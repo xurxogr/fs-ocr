@@ -7,9 +7,9 @@ use rayon::prelude::*;
 
 use crate::constants::{
     compute_scale_factor, scale_value, BOX_HEIGHT, BOX_WIDTH, COLUMN_OFFSET, GRAY_LOWER,
-    GRAY_UPPER, GROUP_OFFSET, PIXEL_DIFF_TOLERANCE, ROW_OFFSET, SHARD_WIDTH_FACTOR,
-    STOCKPILE_NAME_WIDTH_FACTOR, STOCKPILE_TYPE_WIDTH_FACTOR, TITLE_HEIGHT, TITLE_MARGIN,
-    TITLE_MIN_WIDTH,
+    GRAY_UPPER, GROUP_OFFSET, ICON_TO_QUANTITY_OFFSET, PIXEL_DIFF_TOLERANCE, ROW_OFFSET,
+    SHARD_WIDTH_FACTOR, STOCKPILE_NAME_WIDTH_FACTOR, STOCKPILE_TYPE_WIDTH_FACTOR, TITLE_HEIGHT,
+    TITLE_MARGIN, TITLE_MIN_WIDTH,
 };
 use crate::error::{FsOcrError, Result};
 
@@ -193,19 +193,14 @@ impl GreyMaskDetector {
         let rw = roi_w as usize;
         let rh = roi_h as usize;
 
-        // Step 1: Find the most common "black" color in first ROW_OFFSET rows
-        // This handles dark images where quantity boxes are at grey=15
-        let row_height = scale_value(ROW_OFFSET, self.scale_factor) as usize;
-        let scan_height = row_height.min(rh);
-        let dominant_black = self.find_dominant_black(image, iw, rx, ry, rw, scan_height);
-
-        // Step 2: Create mask using (dominant_black + gap) as threshold
-        // Gap should be large enough to skip black but small enough to detect boxes
-        // Normal images: black=0-5, boxes=76, gap doesn't matter much
-        // Dark images: black=0, boxes=15, need gap = 14 to detect >= 15
-        const BLACK_GAP: u8 = 14;
-        let threshold = dominant_black.saturating_add(BLACK_GAP);
-        let mask = self.create_threshold_mask_roi(image, iw, rx, ry, rw, rh, threshold);
+        // Create mask using fixed threshold of 14
+        // Works for all image types:
+        // - Normal: black=0-5, boxes=76-80 → 76 > 14 ✓
+        // - Dark: black=0-1, boxes=79-80 → 79 > 14 ✓
+        // - Gamma dark: black=0, boxes=15 → 15 > 14 ✓
+        // - Light: black=0-2, boxes=166-167 → 166 > 14 ✓
+        const BOX_THRESHOLD: u8 = 14;
+        let mask = self.create_threshold_mask_roi(image, iw, rx, ry, rw, rh, BOX_THRESHOLD);
 
         // Step 3: Find contours directly (no morphology - higher threshold keeps boxes separated)
         let contours = find_contours(&mask, rw, rh);
@@ -250,106 +245,7 @@ impl GreyMaskDetector {
 
     /// Find the most common grey value in the ROI.
     ///
-    /// Scans non-black pixels and builds a histogram to find the dominant grey.
-    /// This is typically the quantity box background color (~76 at 1080p).
-    fn find_dominant_grey(
-        &self,
-        image: &[u8],
-        img_width: usize,
-        roi_x: usize,
-        roi_y: usize,
-        roi_w: usize,
-        roi_h: usize,
-    ) -> u8 {
-        const BLACK_THRESHOLD: u8 = 15;
-
-        // Build histogram of grey values (only for non-black pixels)
-        let mut histogram = [0u32; 256];
-
-        for dy in 0..roi_h {
-            let y = roi_y + dy;
-            for dx in 0..roi_w {
-                let x = roi_x + dx;
-                let idx = (y * img_width + x) * 3;
-                let r = image[idx];
-                let g = image[idx + 1];
-                let b = image[idx + 2];
-
-                // Only count non-black grey pixels
-                if r > BLACK_THRESHOLD || g > BLACK_THRESHOLD || b > BLACK_THRESHOLD {
-                    // Check if it's grey (low saturation)
-                    let max_v = r.max(g).max(b);
-                    let min_v = r.min(g).min(b);
-                    if max_v > 0 && (max_v - min_v) <= 15 {
-                        // Use average as grey value
-                        let grey = ((r as u16 + g as u16 + b as u16) / 3) as u8;
-                        histogram[grey as usize] += 1;
-                    }
-                }
-            }
-        }
-
-        // Find the most common grey value above BLACK_THRESHOLD
-        // Start from BLACK_THRESHOLD+1 to handle dark images where boxes are grey ~20-30
-        let min_grey = (BLACK_THRESHOLD + 1) as usize;
-        let dominant = histogram[min_grey..=100]
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, &count)| count)
-            .map(|(idx, _)| (idx + min_grey) as u8)
-            .unwrap_or(76); // Default to 76 if no grey found
-
-        dominant
-    }
-
-    /// Find the most common "black" color in a region.
-    ///
-    /// Scans pixels and builds a histogram to find the dominant dark value.
-    /// This is the background color (typically 0-5 for normal images,
-    /// or 0 for dark images).
-    fn find_dominant_black(
-        &self,
-        image: &[u8],
-        img_width: usize,
-        roi_x: usize,
-        roi_y: usize,
-        roi_w: usize,
-        roi_h: usize,
-    ) -> u8 {
-        // Build histogram of dark values (0-20 range)
-        let mut histogram = [0u32; 21];
-
-        for dy in 0..roi_h {
-            let y = roi_y + dy;
-            for dx in 0..roi_w {
-                let x = roi_x + dx;
-                let idx = (y * img_width + x) * 3;
-                let r = image[idx];
-                let g = image[idx + 1];
-                let b = image[idx + 2];
-
-                // Check if it's a dark pixel (low brightness)
-                let max_v = r.max(g).max(b);
-                if max_v <= 20 {
-                    let grey = ((r as u16 + g as u16 + b as u16) / 3) as usize;
-                    if grey < histogram.len() {
-                        histogram[grey] += 1;
-                    }
-                }
-            }
-        }
-
-        // Find the most common dark value (including 0)
-        histogram
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, &count)| count)
-            .map(|(idx, _)| idx as u8)
-            .unwrap_or(0)
-    }
-
     /// Create a mask using a threshold - pixels with any RGB > threshold are white.
-    #[allow(dead_code)]
     fn create_threshold_mask_roi(
         &self,
         image: &[u8],
@@ -373,174 +269,7 @@ impl GreyMaskDetector {
                         let b = image[idx + 2];
 
                         // All channels must exceed threshold to exclude noise pixels
-                        // like RGB=(15,11,4) where only R > threshold
                         if r > threshold && g > threshold && b > threshold {
-                            255u8
-                        } else {
-                            0u8
-                        }
-                    })
-                    .collect::<Vec<u8>>()
-            })
-            .collect()
-    }
-
-    /// Create a "not black" mask for ROI - pixels with any RGB > BLACK_THRESHOLD.
-    #[allow(dead_code)]
-    fn create_not_black_mask_roi(
-        &self,
-        image: &[u8],
-        img_width: usize,
-        roi_x: usize,
-        roi_y: usize,
-        roi_w: usize,
-        roi_h: usize,
-    ) -> Vec<u8> {
-        const BLACK_THRESHOLD: u8 = 15;
-
-        (0..roi_h)
-            .into_par_iter()
-            .flat_map(|dy| {
-                let y = roi_y + dy;
-                (0..roi_w)
-                    .map(|dx| {
-                        let x = roi_x + dx;
-                        let idx = (y * img_width + x) * 3;
-                        let r = image[idx];
-                        let g = image[idx + 1];
-                        let b = image[idx + 2];
-
-                        // Any pixel that is NOT black is content
-                        if r > BLACK_THRESHOLD || g > BLACK_THRESHOLD || b > BLACK_THRESHOLD {
-                            255u8
-                        } else {
-                            0u8
-                        }
-                    })
-                    .collect::<Vec<u8>>()
-            })
-            .collect()
-    }
-
-    /// Apply adaptive threshold for ROI detection without copying image data.
-    ///
-    /// This version works directly with the full image and ROI coordinates.
-    #[allow(clippy::too_many_arguments)]
-    fn apply_adaptive_threshold_roi(
-        &self,
-        image: &[u8],
-        img_width: usize,
-        roi_x: usize,
-        roi_y: usize,
-        roi_w: usize,
-        roi_h: usize,
-        valid_boxes: &[BoundingRect],
-        processed_mask: &[u8],
-    ) -> (Vec<BoundingRect>, bool) {
-        // Measure grey values from detected boxes
-        let mut background_greys: Vec<u8> = Vec::new();
-
-        for &(x, y, bw, bh) in valid_boxes {
-            let bx = x as usize;
-            let by = y as usize;
-            let bw = bw as usize;
-            let bh = bh as usize;
-
-            // Collect grey values where mask is white
-            for dy in 0..bh {
-                for dx in 0..bw {
-                    let py = by + dy;
-                    let px = bx + dx;
-                    if py < roi_h && px < roi_w {
-                        let mask_idx = py * roi_w + px;
-                        if processed_mask[mask_idx] > 0 {
-                            // Get the grey value from the full image
-                            let img_idx = ((roi_y + py) * img_width + (roi_x + px)) * 3;
-                            let r = image[img_idx] as u32;
-                            let g = image[img_idx + 1] as u32;
-                            let b = image[img_idx + 2] as u32;
-                            let grey = ((r + g + b) / 3) as u8;
-                            background_greys.push(grey);
-                        }
-                    }
-                }
-            }
-        }
-
-        if background_greys.is_empty() {
-            return (valid_boxes.to_vec(), false);
-        }
-
-        // Calculate median
-        background_greys.sort_unstable();
-        let median = background_greys[background_greys.len() / 2];
-
-        // Calculate adaptive range: median ± 5 (bounded by original limits)
-        const MARGIN: u8 = 5;
-        let adaptive_lower = median.saturating_sub(MARGIN).max(self.gray_lower);
-        let adaptive_upper = median.saturating_add(MARGIN).min(self.gray_upper);
-
-        // Only re-detect if adaptive range is tighter
-        if adaptive_lower <= self.gray_lower && adaptive_upper >= self.gray_upper {
-            return (valid_boxes.to_vec(), false);
-        }
-
-        // Second pass with adaptive thresholds
-        let adaptive_mask = self.create_grey_mask_roi_with_range(
-            image,
-            img_width,
-            roi_x,
-            roi_y,
-            roi_w,
-            roi_h,
-            adaptive_lower,
-            adaptive_upper,
-        );
-        let adaptive_processed = self.apply_morphology(&adaptive_mask, roi_w, roi_h);
-        let adaptive_contours = find_contours(&adaptive_processed, roi_w, roi_h);
-
-        let adaptive_boxes: Vec<BoundingRect> = adaptive_contours
-            .into_iter()
-            .filter(|&(_, _, cw, ch)| self.is_valid_box_size(cw, ch))
-            .collect();
-
-        // Return adaptive result if it found boxes, otherwise fall back to original
-        if adaptive_boxes.is_empty() {
-            (valid_boxes.to_vec(), false)
-        } else {
-            (adaptive_boxes, true)
-        }
-    }
-
-    /// Create grey mask for ROI with custom threshold range.
-    #[allow(clippy::too_many_arguments)]
-    fn create_grey_mask_roi_with_range(
-        &self,
-        image: &[u8],
-        img_width: usize,
-        roi_x: usize,
-        roi_y: usize,
-        roi_w: usize,
-        roi_h: usize,
-        lower: u8,
-        upper: u8,
-    ) -> Vec<u8> {
-        (0..roi_h)
-            .into_par_iter()
-            .flat_map(|y| {
-                (0..roi_w)
-                    .map(|x| {
-                        let idx = ((roi_y + y) * img_width + (roi_x + x)) * 3;
-                        let r = image[idx];
-                        let g = image[idx + 1];
-                        let b = image[idx + 2];
-
-                        // Check if pixel is grey (similar R, G, B) within range
-                        let max_val = r.max(g).max(b);
-                        let min_val = r.min(g).min(b);
-                        let avg = ((r as u16 + g as u16 + b as u16) / 3) as u8;
-
-                        if (max_val - min_val) <= 15 && avg >= lower && avg <= upper {
                             255u8
                         } else {
                             0u8
@@ -582,73 +311,6 @@ impl GreyMaskDetector {
                     .collect::<Vec<u8>>()
             })
             .collect()
-    }
-
-    /// Create a grey mask for an ROI region with downscaling.
-    /// Samples every `scale`th pixel in both dimensions.
-    fn create_grey_mask_roi_downscaled(
-        &self,
-        image: &[u8],
-        img_width: usize,
-        roi_x: usize,
-        roi_y: usize,
-        roi_w: usize,
-        roi_h: usize,
-        scale: usize,
-    ) -> Vec<u8> {
-        let ds_h = roi_h / scale;
-        let ds_w = roi_w / scale;
-
-        (0..ds_h)
-            .into_par_iter()
-            .flat_map(|dy| {
-                let y = roi_y + dy * scale;
-                (0..ds_w)
-                    .map(|dx| {
-                        let x = roi_x + dx * scale;
-                        let idx = (y * img_width + x) * 3;
-                        let r = image[idx];
-                        let g = image[idx + 1];
-                        let b = image[idx + 2];
-
-                        if Self::is_grey_pixel_static(r, g, b, self.gray_lower, self.gray_upper) {
-                            255u8
-                        } else {
-                            0u8
-                        }
-                    })
-                    .collect::<Vec<u8>>()
-            })
-            .collect()
-    }
-
-    /// Apply morphology with scaled kernels for downscaled images.
-    fn apply_morphology_scaled(
-        &self,
-        mask: &[u8],
-        width: usize,
-        height: usize,
-        scale: usize,
-    ) -> Vec<u8> {
-        // Scale down kernel sizes (minimum 1)
-        let close_kernel = (3 / scale).max(1);
-        let open_kernel = (5 / scale).max(2);
-
-        // Close operation (dilate then erode) - fills small gaps
-        let closed = dilate(mask, width, height, close_kernel);
-        let closed = erode(&closed, width, height, close_kernel);
-
-        // Open operation (erode then dilate) - separates merged boxes
-        let opened = erode(&closed, width, height, open_kernel);
-        dilate(&opened, width, height, open_kernel)
-    }
-
-    /// Fast morphology - just close operation (4 passes instead of 8).
-    fn apply_morphology_fast(&self, mask: &[u8], width: usize, height: usize) -> Vec<u8> {
-        // Close operation only (dilate then erode) - fills small gaps
-        // Skip open operation - ROI from black box is already clean
-        let closed = dilate(mask, width, height, 3);
-        erode(&closed, width, height, 3)
     }
 
     /// Internal detection with configurable adaptive threshold.
@@ -854,6 +516,99 @@ impl GreyMaskDetector {
         let shard_x = self.box_height;
         let shard_y = self.image_height - self.box_height * 3;
         regions.shard_region = Some((shard_x, shard_y, self.shard_width, self.box_height));
+    }
+
+    /// Detect stockpile type, name, and shard regions based on info bar height.
+    ///
+    /// Info bar heights at 2160p:
+    /// - Old format: GROUP_OFFSET - ROW_OFFSET - GREY_BAR_HEIGHT = 14px
+    /// - No custom name: ROW_OFFSET = 78px
+    /// - Pinned: COLUMN_OFFSET = 112px
+    /// - Unpinned: ROW_OFFSET + BOX_HEIGHT + GREY_BAR_HEIGHT = 148px
+    pub fn detect_stockpile_regions_with_info_bar(
+        &self,
+        regions: &mut DetectedRegions,
+        roi_x: i32,
+        roi_y: i32,
+    ) {
+        if regions.quantity_boxes.is_empty() {
+            return;
+        }
+
+        let (first_x, first_y) = regions.quantity_boxes[0];
+        let info_bar_height = regions.info_bar_height;
+
+        // Find max x coordinate across all quantity boxes
+        let max_detected_x = regions
+            .quantity_boxes
+            .iter()
+            .map(|&(x, _)| x)
+            .max()
+            .unwrap_or(first_x);
+
+        // Icon x is offset to the left of quantity box
+        let icon_to_qty_offset = scale_value(ICON_TO_QUANTITY_OFFSET, self.scale_factor);
+        let first_icon_x = first_x - icon_to_qty_offset;
+
+        // Title region calculations
+        let title_min_x = first_icon_x - self.title_margin / 2;
+        let title_y = roi_y;
+
+        let title_max_x = (max_detected_x + self.box_width + self.title_margin)
+            .max(title_min_x + self.title_min_width);
+
+        // Stockpile type region: ABOVE the ROI, narrow width to avoid background
+        // Width is 4x box_width (stockpile_type_width), height is box_height
+        regions.type_region = Some((
+            roi_x + self.box_width / 4,
+            roi_y - self.box_height,
+            self.stockpile_type_width,
+            self.box_height,
+        ));
+
+        // Shard/timestamp region (bottom-left corner)
+        let shard_x = self.box_height;
+        let shard_y = self.image_height - self.box_height * 3;
+        regions.shard_region = Some((shard_x, shard_y, self.shard_width, self.box_height));
+
+        // Thresholds at 2160p (derived from constants):
+        // - Old format: < (GROUP_OFFSET - ROW_OFFSET) = 20
+        // - No name: < GROUP_OFFSET = 98
+        // - Pinned: < ROW_OFFSET + BOX_HEIGHT = 142
+        // - Unpinned: >= 142
+        let threshold_old = self.group_offset - self.row_offset;
+        let threshold_no_name = self.group_offset;
+        let threshold_pinned = self.row_offset + self.box_height;
+
+        if info_bar_height < threshold_old {
+            // Old format: name at title_max_x - stockpile_name_width - box_width
+            let name_x = title_max_x - self.stockpile_name_width - self.box_width;
+            regions.name_region = Some((
+                name_x,
+                title_y,
+                self.stockpile_name_width,
+                self.title_height,
+            ));
+        } else if info_bar_height < threshold_no_name {
+            // No custom name
+            regions.name_region = None;
+        } else if info_bar_height < threshold_pinned {
+            // Pinned: name at same X as type region
+            let type_margin = self.box_width / 4;
+            let name_x = roi_x + type_margin;
+            let top_margin = scale_value(3, self.scale_factor);
+            let name_y = first_y - self.box_height - self.title_margin / 6 + top_margin;
+            let name_w = self.box_width + self.title_height - self.title_margin / 12;
+            let name_h = self.title_height / 2 + self.title_margin / 12 - top_margin;
+            regions.name_region = Some((name_x, name_y, name_w, name_h));
+        } else {
+            // Unpinned: custom name in info bar area
+            let name_x = first_x - self.title_margin / 2;
+            let name_y = first_y - self.group_offset;
+            let name_w = self.box_width * 2;
+            let name_h = self.title_height;
+            regions.name_region = Some((name_x, name_y, name_w, name_h));
+        }
     }
 
     /// Create a grey mask from an RGB image (parallelized).

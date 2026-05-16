@@ -49,6 +49,8 @@ pub struct DetectedRegions {
     pub box_width: i32,
     /// Scaled box height for quantity regions.
     pub box_height: i32,
+    /// Info bar height (first_box_y - roi_y), used to determine stockpile format.
+    pub info_bar_height: i32,
 }
 
 impl DetectedRegions {
@@ -71,6 +73,7 @@ impl DetectedRegions {
             shard_region: None,
             box_width,
             box_height,
+            info_bar_height: 0,
         }
     }
 

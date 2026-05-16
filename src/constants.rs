@@ -24,6 +24,9 @@ pub const ROW_OFFSET: i32 = 78;
 /// Vertical spacing between groups at 2160p.
 pub const GROUP_OFFSET: i32 = 98;
 
+/// Horizontal offset from icon to quantity box at 2160p.
+pub const ICON_TO_QUANTITY_OFFSET: i32 = 88;
+
 /// Margin from first icon to title at 2160p.
 pub const TITLE_MARGIN: i32 = 24;
 
@@ -32,9 +35,6 @@ pub const TITLE_MIN_WIDTH: i32 = 600;
 
 /// Title region height at 2160p.
 pub const TITLE_HEIGHT: i32 = 64;
-
-/// Gap between icon and quantity box at 2160p.
-pub const ICON_TO_QUANTITY_OFFSET: i32 = 88;
 
 // =============================================================================
 // Grey Detection Thresholds
@@ -108,6 +108,13 @@ pub const STOCKPILE_NAME_WIDTH_FACTOR: f64 = 2.5;
 
 /// Shard width factor (3.5x box_width at 2160p).
 pub const SHARD_WIDTH_FACTOR: f64 = 3.5;
+
+// =============================================================================
+// Info Bar Heights (for stockpile type detection)
+// =============================================================================
+
+/// Height of the grey separator bar at 2160p.
+pub const GREY_BAR_HEIGHT: i32 = 6;
 
 // =============================================================================
 // Supported Resolutions

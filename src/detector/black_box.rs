@@ -31,21 +31,8 @@ const VALID_WIDTHS_2160: [i32; 5] = [600, 612, 808, 1004, 1200];
 pub struct BlackBoxResult {
     /// Bounding region of the detected stockpile area (with padding).
     pub roi: BoundingRect,
-    /// Individual icon group boxes detected.
-    pub icon_groups: Vec<IconGroupInfo>,
     /// Scale factor used for detection.
     pub scale_factor: f64,
-}
-
-/// Information about a detected icon group (black box area).
-#[derive(Debug, Clone)]
-pub struct IconGroupInfo {
-    /// Bounding box of the icon group.
-    pub bounds: BoundingRect,
-    /// Estimated number of rows in this group.
-    pub estimated_rows: usize,
-    /// Rectangularity score (0.0 - 1.0).
-    pub rectangularity: f64,
 }
 
 /// A horizontal run of black pixels.
@@ -263,37 +250,51 @@ impl BlackBoxDetector {
         }
 
         // Step 5: Extend UP from first bar until non-black
+        // Allow small gaps (info bar separators) of up to 6px at 2160p, min 3px
+        let max_gap = scale_value(6, self.scale_factor).max(3) as usize;
         let check_x = (roi_x + roi_w / 2) as usize;
         let mut y_start = first_bar_y;
+        let mut gap_count = 0usize;
         for check_y in (0..first_bar_y as usize).rev() {
             if check_x >= w {
                 break;
             }
             let idx = (check_y * w + check_x) * 3;
-            if image[idx] < BLACK_THRESHOLD
+            let is_black = image[idx] < BLACK_THRESHOLD
                 && image[idx + 1] < BLACK_THRESHOLD
-                && image[idx + 2] < BLACK_THRESHOLD
-            {
+                && image[idx + 2] < BLACK_THRESHOLD;
+
+            if is_black {
                 y_start = check_y as i32;
+                gap_count = 0;
             } else {
-                break;
+                gap_count += 1;
+                if gap_count > max_gap {
+                    break;
+                }
             }
         }
 
         // Step 6: Extend DOWN from last bar until non-black
         let mut y_end = last_bar_y;
+        let mut gap_count = 0usize;
         for check_y in (last_bar_y as usize + 1)..h {
             if check_x >= w {
                 break;
             }
             let idx = (check_y * w + check_x) * 3;
-            if image[idx] < BLACK_THRESHOLD
+            let is_black = image[idx] < BLACK_THRESHOLD
                 && image[idx + 1] < BLACK_THRESHOLD
-                && image[idx + 2] < BLACK_THRESHOLD
-            {
+                && image[idx + 2] < BLACK_THRESHOLD;
+
+            if is_black {
                 y_end = check_y as i32;
+                gap_count = 0;
             } else {
-                break;
+                gap_count += 1;
+                if gap_count > max_gap {
+                    break;
+                }
             }
         }
 
@@ -312,19 +313,8 @@ impl BlackBoxDetector {
 
         let roi = (roi_x.max(0), y_start.max(0), final_roi_w, final_roi_h);
 
-        // Build icon groups from the detected runs
-        let icon_groups: Vec<IconGroupInfo> = best_group
-            .iter()
-            .map(|r| IconGroupInfo {
-                bounds: (r.x, r.y, r.width, self.sample_rate as i32),
-                estimated_rows: 1,
-                rectangularity: 0.95,
-            })
-            .collect();
-
         Ok(Some(BlackBoxResult {
             roi,
-            icon_groups,
             scale_factor: self.scale_factor,
         }))
     }

@@ -123,6 +123,55 @@ impl ScanPipeline {
         self.database.is_some()
     }
 
+    /// Public wrapper for ensure_initialized (for debug methods).
+    pub fn ensure_initialized_public(&mut self, resolution: i32) -> Result<()> {
+        self.ensure_initialized(resolution)
+    }
+
+    /// Public wrapper for detect_stockpile_regions (for debug methods).
+    pub fn detect_stockpile_regions_public(
+        &self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+    ) -> Result<(crate::detector::DetectedRegions, f64, f64)> {
+        self.detect_stockpile_regions(image, width, height)
+    }
+
+    /// Extract text from a region using English OCR (for debug).
+    pub fn extract_text_from_region_public(
+        &self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    ) -> Result<String> {
+        let extractor = match &self.text_extractor_eng {
+            Some(e) => e,
+            None => return Ok("(OCR not initialized)".to_string()),
+        };
+
+        let scale_factor = height as f64 / 2160.0;
+        let region_img = extract_region(
+            image,
+            width as usize,
+            height as usize,
+            x.max(0) as usize,
+            y.max(0) as usize,
+            w as usize,
+            h as usize,
+        );
+
+        let (processed, proc_w, proc_h) =
+            preprocess_for_text(&region_img, w as usize, h as usize, scale_factor);
+
+        let text = extractor.extract_text(&processed, proc_w as i32, proc_h as i32, 1)?;
+        Ok(text)
+    }
+
     /// Scan a stockpile screenshot.
     ///
     /// Args:
@@ -783,6 +832,12 @@ impl ScanPipeline {
 
         // Update vertical resolution to original image height
         regions.vertical_resolution = height;
+
+        // Step 4: Detect stockpile type/name regions based on info bar height
+        if let Some(&(_, first_y)) = regions.quantity_boxes.first() {
+            regions.info_bar_height = first_y - roi_y;
+            detector.detect_stockpile_regions_with_info_bar(&mut regions, roi_x, roi_y);
+        }
 
         Ok((regions, blackbox_ms, greymask_ms))
     }

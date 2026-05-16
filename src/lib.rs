@@ -251,16 +251,14 @@ impl StockpileScanner {
         Ok(contours)
     }
 
-    /// Debug: Detect black box regions (icon group areas).
+    /// Debug: Detect black box region (stockpile ROI).
     ///
-    /// Returns the ROI bounding box and list of icon group info:
-    /// ((roi_x, roi_y, roi_w, roi_h), [(x, y, w, h, estimated_rows, rectangularity), ...])
+    /// Returns the ROI bounding box: (roi_x, roi_y, roi_w, roi_h)
     #[pyo3(signature = (image,))]
-    #[allow(clippy::type_complexity)]
     pub fn debug_detect_black_boxes(
         &self,
         image: PyReadonlyArray3<u8>,
-    ) -> PyResult<Option<((i32, i32, i32, i32), Vec<(i32, i32, i32, i32, usize, f64)>)>> {
+    ) -> PyResult<Option<(i32, i32, i32, i32)>> {
         let shape = image.shape();
         let height = shape[0] as i32;
         let width = shape[1] as i32;
@@ -271,20 +269,53 @@ impl StockpileScanner {
             .detect(image_data, width, height)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        match result {
-            Some(r) => {
-                let groups: Vec<(i32, i32, i32, i32, usize, f64)> = r
-                    .icon_groups
-                    .iter()
-                    .map(|g| {
-                        let (x, y, w, h) = g.bounds;
-                        (x, y, w, h, g.estimated_rows, g.rectangularity)
-                    })
-                    .collect();
-                Ok(Some((r.roi, groups)))
-            }
-            None => Ok(None),
-        }
+        Ok(result.map(|r| r.roi))
+    }
+
+    /// Debug: Get detected regions including type_region, name_region, shard_region.
+    ///
+    /// Returns a dict with region info for debugging OCR.
+    #[pyo3(signature = (image,))]
+    pub fn debug_detect_regions(
+        &mut self,
+        image: PyReadonlyArray3<u8>,
+    ) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
+        let shape = image.shape();
+        let height = shape[0] as i32;
+        let width = shape[1] as i32;
+        let image_data = image.as_slice()?;
+
+        // Initialize to set up text extractors
+        self.pipeline
+            .ensure_initialized_public(height)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        // Detect regions
+        let (regions, _, _) = self
+            .pipeline
+            .detect_stockpile_regions_public(image_data, width, height)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        // Extract OCR text from type region if available
+        let type_text = if let Some((x, y, w, h)) = regions.type_region {
+            self.pipeline
+                .extract_text_from_region_public(image_data, width, height, x, y, w, h)
+                .unwrap_or_else(|_| "(OCR error)".to_string())
+        } else {
+            "(no type region)".to_string()
+        };
+
+        // Build result dict
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("info_bar_height", regions.info_bar_height)?;
+            dict.set_item("type_region", regions.type_region)?;
+            dict.set_item("name_region", regions.name_region)?;
+            dict.set_item("shard_region", regions.shard_region)?;
+            dict.set_item("box_count", regions.quantity_boxes.len())?;
+            dict.set_item("type_text_raw", type_text)?;
+            Ok(dict.into())
+        })
     }
 
     /// Scan a stockpile screenshot from file path.

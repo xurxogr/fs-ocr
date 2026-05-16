@@ -102,8 +102,8 @@ impl StockpileType {
             return StockpileType::Undefined;
         }
 
-        // Try exact match first
-        if let Some(t) = Self::exact_match(cleaned) {
+        // Try exact match first (case-insensitive)
+        if let Some(t) = Self::exact_match_ignore_case(cleaned) {
             return t;
         }
 
@@ -111,129 +111,125 @@ impl StockpileType {
         Self::fuzzy_match(cleaned)
     }
 
-    /// Exact match against all known translations.
-    fn exact_match(text: &str) -> Option<Self> {
-        // All known translations for each type
-        const ENCAMPMENT: &[&str] = &[
-            "Encampment",
-            "Feldlager",
-            "Campement",
-            "Acampamento",
-            "Лагерь",
-            "营地",
-        ];
-        const KEEP: &[&str] = &[
-            "Keep",
-            "Wehrturm",
-            "Place Forte",
-            "Torreão",
-            "Крепость",
-            "要塞",
-        ];
-        const SAFE_HOUSE: &[&str] = &[
-            "Safe House",
-            "Unterschlupf",
-            "Planque",
-            "Casa Fortificada",
-            "Убежище",
-            "安全屋",
-        ];
-        const RELIC_BASE: &[&str] = &[
-            "Relic Base",
-            "Reliktbasis",
-            "Base Relique",
-            "Base Relíquia",
-            "Реликтовая База",
-            "遗迹基地",
-        ];
-        const BUNKER_BASE: &[&str] = &[
-            "Bunker Base",
-            "Bunkerbasis",
-            "Base Bunker",
-            "Centro do Bunker",
-            "Base de Bunker",
-            "Centro do bunker",
-            "Бункерная база",
-            "Бункерная База",
-            "地堡基地",
-        ];
-        const BORDER_BASE: &[&str] = &[
-            "Border Base",
-            "Grenzbasis",
-            "Base Frontalière",
-            "Base Fronteiriça",
-            "Пограничная База",
-            "边境基地",
-        ];
-        const TOWN_BASE: &[&str] = &[
-            "Town Base",
-            "Stadtkernbasis",
-            "Quartier Général",
-            "Base da Cidade",
-            "Ратуша",
-            "城镇基地",
-        ];
-        const UNDERGROUND_FORTRESS: &[&str] = &[
-            "Underground Fortress",
-            "Untergrundfestung",
-            "Forteresse Souterraine",
-            "Bunker Subterrâneo",
-            "Подземная Крепость",
-            "地下要塞",
-        ];
-        const BMS_LONGHOOK: &[&str] = &["BMS - Longhook"];
-        const STORAGE_DEPOT: &[&str] = &[
-            "Storage Depot",
-            "Lagerdepot",
-            "Dépôt",
-            "Depósito",
-            "Складское помещение",
-            "仓库",
-        ];
-        const SEAPORT: &[&str] = &[
-            "Seaport",
-            "Seehafen",
-            "Port",
-            "Porto",
-            "Морской порт",
-            "海港",
-        ];
-        const AIRCRAFT_DEPOT: &[&str] = &["Aircraft Depot"];
+    /// Case-insensitive match against all known translations.
+    fn exact_match_ignore_case(text: &str) -> Option<Self> {
+        let text_lower = text.to_lowercase();
 
-        if ENCAMPMENT.contains(&text) {
+        // Helper to check if any item matches case-insensitively
+        let matches = |list: &[&str]| list.iter().any(|s| s.to_lowercase() == text_lower);
+
+        if matches(Self::ENCAMPMENT) {
             return Some(StockpileType::Encampment);
         }
-        if KEEP.contains(&text) {
+        if matches(Self::KEEP) {
             return Some(StockpileType::Keep);
         }
-        if SAFE_HOUSE.contains(&text) {
+        if matches(Self::SAFE_HOUSE) {
             return Some(StockpileType::SafeHouse);
         }
-        if RELIC_BASE.contains(&text) {
+        if matches(Self::RELIC_BASE) {
             return Some(StockpileType::RelicBase);
         }
-        if BUNKER_BASE.contains(&text) {
+        if matches(Self::BUNKER_BASE) {
             return Some(StockpileType::BunkerBase);
         }
-        if BORDER_BASE.contains(&text) {
+        if matches(Self::BORDER_BASE) {
             return Some(StockpileType::BorderBase);
         }
-        if TOWN_BASE.contains(&text) {
+        if matches(Self::TOWN_BASE) {
             return Some(StockpileType::TownBase);
         }
-        if UNDERGROUND_FORTRESS.contains(&text) {
+        if matches(Self::UNDERGROUND_FORTRESS) {
             return Some(StockpileType::UndergroundFortress);
         }
-        if BMS_LONGHOOK.contains(&text) {
+        if matches(Self::BMS_LONGHOOK) {
             return Some(StockpileType::BmsLonghook);
         }
-        if STORAGE_DEPOT.contains(&text) {
+        if matches(Self::STORAGE_DEPOT) {
             return Some(StockpileType::StorageDepot);
         }
-        if SEAPORT.contains(&text) {
+        if matches(Self::SEAPORT) {
             return Some(StockpileType::Seaport);
         }
-        if AIRCRAFT_DEPOT.contains(&text) {
+        if matches(Self::AIRCRAFT_DEPOT) {
+            return Some(StockpileType::AircraftDepot);
+        }
+
+        None
+    }
+
+    // Type name constants for reuse
+    const ENCAMPMENT: &'static [&'static str] = &[
+        "Encampment", "Feldlager", "Campement", "Acampamento", "Лагерь", "营地",
+    ];
+    const KEEP: &'static [&'static str] = &[
+        "Keep", "Wehrturm", "Place Forte", "Torreão", "Крепость", "要塞",
+    ];
+    const SAFE_HOUSE: &'static [&'static str] = &[
+        "Safe House", "Unterschlupf", "Planque", "Casa Fortificada", "Убежище", "安全屋",
+    ];
+    const RELIC_BASE: &'static [&'static str] = &[
+        "Relic Base", "Reliktbasis", "Base Relique", "Base Relíquia", "Реликтовая База", "遗迹基地",
+    ];
+    const BUNKER_BASE: &'static [&'static str] = &[
+        "Bunker Base", "Bunkerbasis", "Base Bunker", "Centro do Bunker", "Base de Bunker",
+        "Centro do bunker", "Бункерная база", "Бункерная База", "地堡基地",
+    ];
+    const BORDER_BASE: &'static [&'static str] = &[
+        "Border Base", "Grenzbasis", "Base Frontalière", "Base Fronteiriça", "Пограничная База", "边境基地",
+    ];
+    const TOWN_BASE: &'static [&'static str] = &[
+        "Town Base", "Stadtkernbasis", "Quartier Général", "Base da Cidade", "Ратуша", "城镇基地",
+    ];
+    const UNDERGROUND_FORTRESS: &'static [&'static str] = &[
+        "Underground Fortress", "Untergrundfestung", "Forteresse Souterraine", "Bunker Subterrâneo",
+        "Подземная Крепость", "地下要塞",
+    ];
+    const BMS_LONGHOOK: &'static [&'static str] = &["BMS - Longhook"];
+    const STORAGE_DEPOT: &'static [&'static str] = &[
+        "Storage Depot", "Lagerdepot", "Dépôt", "Depósito", "Складское помещение", "仓库",
+    ];
+    const SEAPORT: &'static [&'static str] = &[
+        "Seaport", "Seehafen", "Port", "Porto", "Морской порт", "海港",
+    ];
+    const AIRCRAFT_DEPOT: &'static [&'static str] = &["Aircraft Depot"];
+
+    /// Exact match against all known translations (case-sensitive).
+    fn exact_match(text: &str) -> Option<Self> {
+        if Self::ENCAMPMENT.contains(&text) {
+            return Some(StockpileType::Encampment);
+        }
+        if Self::KEEP.contains(&text) {
+            return Some(StockpileType::Keep);
+        }
+        if Self::SAFE_HOUSE.contains(&text) {
+            return Some(StockpileType::SafeHouse);
+        }
+        if Self::RELIC_BASE.contains(&text) {
+            return Some(StockpileType::RelicBase);
+        }
+        if Self::BUNKER_BASE.contains(&text) {
+            return Some(StockpileType::BunkerBase);
+        }
+        if Self::BORDER_BASE.contains(&text) {
+            return Some(StockpileType::BorderBase);
+        }
+        if Self::TOWN_BASE.contains(&text) {
+            return Some(StockpileType::TownBase);
+        }
+        if Self::UNDERGROUND_FORTRESS.contains(&text) {
+            return Some(StockpileType::UndergroundFortress);
+        }
+        if Self::BMS_LONGHOOK.contains(&text) {
+            return Some(StockpileType::BmsLonghook);
+        }
+        if Self::STORAGE_DEPOT.contains(&text) {
+            return Some(StockpileType::StorageDepot);
+        }
+        if Self::SEAPORT.contains(&text) {
+            return Some(StockpileType::Seaport);
+        }
+        if Self::AIRCRAFT_DEPOT.contains(&text) {
             return Some(StockpileType::AircraftDepot);
         }
 
