@@ -27,3 +27,9 @@ dev = ["pytest", "numpy"]
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "fs_ocr"
+include = [
+    { path = "tessdata/*.traineddata", format = "sdist" },
+    { path = "tessdata/*.traineddata", format = "wheel" },
+    { path = "tessdata/*.rten", format = "sdist" },
+    { path = "tessdata/*.rten", format = "wheel" },
+]

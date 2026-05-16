@@ -581,13 +581,14 @@ impl GreyMaskDetector {
         let threshold_pinned = self.row_offset + self.box_height;
 
         if info_bar_height < threshold_old {
-            // Old format: name at title_max_x - stockpile_name_width - box_width
+            // Old format: name at same Y level as type region (above ROI)
             let name_x = title_max_x - self.stockpile_name_width - self.box_width;
+            let name_y = roi_y - self.box_height; // Same Y as type_region
             regions.name_region = Some((
                 name_x,
-                title_y,
+                name_y,
                 self.stockpile_name_width,
-                self.title_height,
+                self.box_height, // Same height as type_region
             ));
         } else if info_bar_height < threshold_no_name {
             // No custom name

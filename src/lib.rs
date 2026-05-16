@@ -458,5 +458,15 @@ fn fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "0.1.0")?;
     m.add("__author__", "Foxhole Stockpiles Contributors")?;
 
+    // OCR backend feature flags
+    m.add("HAS_OCR_BASIC", true)?;  // ocrs - always available
+    m.add("HAS_OCR_FULL", cfg!(feature = "ocr-full"))?;  // Tesseract - optional
+
+    // Primary OCR backend info
+    #[cfg(feature = "ocr-full")]
+    m.add("OCR_BACKEND", "tesseract")?;
+    #[cfg(not(feature = "ocr-full"))]
+    m.add("OCR_BACKEND", "ocrs")?;
+
     Ok(())
 }

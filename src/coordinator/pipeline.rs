@@ -23,7 +23,8 @@ use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
 use crate::image_utils;
 use crate::models::{ItemCandidate, Stockpile, StockpileItem};
-use crate::ocr::tesseract::{preprocess_quantity_composite, TextExtractor};
+use crate::ocr::preprocess::preprocess_quantity_composite;
+use crate::ocr::TextExtractor;
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, TemplateMatcher};
 use crate::template::phash::compute_phash;
@@ -84,23 +85,36 @@ impl ScanPipeline {
             }
         }
 
-        // Initialize English text extractor for single-line text (type, name - PSM 7)
+        // Initialize multilingual text extractor for single-line text (type, name - PSM 7)
+        // Supports English, Chinese, and Russian stockpile names
         if self.text_extractor_eng.is_none() {
             // Use empty path to let Tesseract find its default tessdata
-            match TextExtractor::new_for_text_default("eng") {
+            // Try multilingual first, fall back to English only
+            match TextExtractor::new_for_text_default("eng+chi_sim+rus") {
                 Ok(extractor) => self.text_extractor_eng = Some(extractor),
-                Err(e) => {
-                    eprintln!("Warning: Failed to initialize text OCR: {}", e);
+                Err(_) => {
+                    // Fall back to English only if multilingual fails
+                    match TextExtractor::new_for_text_default("eng") {
+                        Ok(extractor) => self.text_extractor_eng = Some(extractor),
+                        Err(e) => {
+                            eprintln!("Warning: Failed to initialize text OCR: {}", e);
+                        }
+                    }
                 }
             }
         }
 
-        // Initialize English text extractor for multi-line text (shard region - PSM 6)
+        // Initialize multilingual text extractor for multi-line text (shard region - PSM 6)
         if self.text_extractor_eng_block.is_none() {
-            match TextExtractor::new_for_text_block_default("eng") {
+            match TextExtractor::new_for_text_block_default("eng+chi_sim+rus") {
                 Ok(extractor) => self.text_extractor_eng_block = Some(extractor),
-                Err(e) => {
-                    eprintln!("Warning: Failed to initialize block text OCR: {}", e);
+                Err(_) => {
+                    match TextExtractor::new_for_text_block_default("eng") {
+                        Ok(extractor) => self.text_extractor_eng_block = Some(extractor),
+                        Err(e) => {
+                            eprintln!("Warning: Failed to initialize block text OCR: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -294,9 +308,10 @@ impl ScanPipeline {
                 h as usize,
             );
 
-            // Preprocess for OCR (similar to Python's _prepare_image_for_detection)
+            // Minimal preprocessing for multilingual OCR (Chinese/Russian/English)
+            // Skip binarization to preserve character details
             let (processed, proc_w, proc_h) =
-                preprocess_for_text(&type_img, w as usize, h as usize, scale_factor);
+                preprocess_for_text_minimal(&type_img, w as usize, h as usize, scale_factor);
 
             let text = extractor.extract_text(
                 &processed,
@@ -488,21 +503,21 @@ impl ScanPipeline {
             })
             .collect();
 
-        // Step 2: Run OCR in parallel using thread-local Tesseract instances
+        // Step 2: Run OCR in parallel using thread-local TextExtractor instances
         use std::cell::RefCell;
         thread_local! {
-            static THREAD_EXTRACTOR: RefCell<Option<crate::ocr::tesseract::TextExtractor>> = const { RefCell::new(None) };
+            static THREAD_EXTRACTOR: RefCell<Option<crate::ocr::TextExtractor>> = const { RefCell::new(None) };
         }
 
         let tessdata_path = self.tessdata_path.clone();
         let ocr_results: Vec<(Vec<i32>, Vec<usize>)> = row_data
             .par_iter()
             .map(|(processed, proc_w, proc_h, indices)| {
-                // Use thread-local Tesseract instance (lazy init)
+                // Use thread-local TextExtractor instance (lazy init)
                 THREAD_EXTRACTOR.with(|cell| {
                     let mut extractor_opt = cell.borrow_mut();
                     if extractor_opt.is_none() {
-                        *extractor_opt = crate::ocr::tesseract::TextExtractor::new(
+                        *extractor_opt = crate::ocr::TextExtractor::new(
                             &tessdata_path,
                             "renner_numbers",
                         )
@@ -905,6 +920,25 @@ fn preprocess_for_text(
     let dilated = dilate_3x3(&binary, new_w, new_h);
 
     (dilated, new_w, new_h)
+}
+
+/// Minimal preprocessing for multilingual text (no binarization).
+/// Tesseract handles its own preprocessing better for Chinese/Russian.
+fn preprocess_for_text_minimal(
+    image: &[u8],
+    width: usize,
+    height: usize,
+    scale_factor: f64,
+) -> (Vec<u8>, usize, usize) {
+    let upscale = 2.0 / scale_factor;
+    let new_w = ((width as f64) * upscale) as usize;
+    let new_h = ((height as f64) * upscale) as usize;
+
+    // Convert RGB to grayscale only, let Tesseract handle the rest
+    let grayscale = image_utils::rgb_to_grayscale(image, width, height);
+    let upscaled = upscale_nearest(&grayscale, width, height, new_w, new_h);
+
+    (upscaled, new_w, new_h)
 }
 
 /// Preprocess image region for text OCR (non-inverted for bright text on dark).

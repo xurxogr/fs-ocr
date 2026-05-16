@@ -2,6 +2,10 @@
 //!
 //! Provides text extraction using Tesseract OCR with custom trained models.
 //! Requires the leptess crate and system Tesseract installation.
+//!
+//! This module is only available when the `ocr-full` feature is enabled.
+
+#![cfg(feature = "ocr-full")]
 
 use std::ffi::CString;
 use std::path::Path;
