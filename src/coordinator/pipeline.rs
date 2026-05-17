@@ -11,9 +11,6 @@ use std::time::Instant;
 /// A typical Foxhole stockpile has 6 columns × ~10 rows = 60 items max per view.
 const MAX_TOTAL_BOXES: usize = 200;
 
-/// Maximum boxes per row (game UI constraint is 6).
-const MAX_BOXES_PER_ROW: usize = 20;
-
 use rayon::prelude::*;
 
 use crate::config::ScanConfig;
@@ -23,8 +20,7 @@ use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
 use crate::image_utils;
 use crate::models::{ItemCandidate, Stockpile, StockpileItem};
-use crate::ocr::preprocess::preprocess_quantity_composite;
-use crate::ocr::TextExtractor;
+use crate::ocr::{digit_matcher, TextExtractor};
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, TemplateMatcher};
 use crate::template::phash::compute_phash;
@@ -33,14 +29,12 @@ use crate::template::phash::compute_phash;
 pub struct ScanPipeline {
     /// Template database path.
     database_path: String,
-    /// Tessdata directory path.
-    tessdata_path: String,
+    /// OCR models directory path.
+    data_path: String,
     /// Scan configuration.
     config: ScanConfig,
     /// Loaded template database (cached).
     database: Option<Arc<TemplateDatabase>>,
-    /// Text extractor for quantity OCR (uses renner_numbers model).
-    text_extractor: Option<TextExtractor>,
     /// Text extractor for single-line text OCR (type, name - PSM 7).
     text_extractor_eng: Option<TextExtractor>,
     /// Text extractor for multi-line text OCR (shard region - PSM 6).
@@ -49,13 +43,12 @@ pub struct ScanPipeline {
 
 impl ScanPipeline {
     /// Create a new scan pipeline.
-    pub fn new<P: AsRef<Path>>(database_path: P, tessdata_path: P, config: ScanConfig) -> Self {
+    pub fn new<P: AsRef<Path>>(database_path: P, data_path: P, config: ScanConfig) -> Self {
         Self {
             database_path: database_path.as_ref().to_string_lossy().to_string(),
-            tessdata_path: tessdata_path.as_ref().to_string_lossy().to_string(),
+            data_path: data_path.as_ref().to_string_lossy().to_string(),
             config,
             database: None,
-            text_extractor: None,
             text_extractor_eng: None,
             text_extractor_eng_block: None,
         }
@@ -74,21 +67,10 @@ impl ScanPipeline {
             self.database = Some(Arc::new(db));
         }
 
-        // Initialize text extractors
-        if self.text_extractor.is_none() {
-            match TextExtractor::new(&self.tessdata_path, "renner_numbers") {
-                Ok(extractor) => self.text_extractor = Some(extractor),
-                Err(e) => {
-                    // Log but don't fail - OCR is optional
-                    eprintln!("Warning: Failed to initialize quantity OCR: {}", e);
-                }
-            }
-        }
-
         // Initialize multilingual text extractor for single-line text (type, name - PSM 7)
         // Supports English, Chinese, and Russian stockpile names
         if self.text_extractor_eng.is_none() {
-            // Use empty path to let Tesseract find its default tessdata
+            // Use system default for Tesseract if ocr-full is enabled
             // Try multilingual first, fall back to English only
             match TextExtractor::new_for_text_default("eng+chi_sim+rus") {
                 Ok(extractor) => self.text_extractor_eng = Some(extractor),
@@ -397,7 +379,10 @@ impl ScanPipeline {
         Ok(())
     }
 
-    /// Extract quantities using parallel per-row OCR.
+    /// Extract quantities using template-based digit matching.
+    ///
+    /// Primary method: template matching for Renner font digits.
+    /// Fallback: OCR for failed recognitions (when ocr-full is enabled).
     fn extract_quantities(
         &self,
         image: &[u8],
@@ -405,28 +390,17 @@ impl ScanPipeline {
         height: i32,
         regions: &crate::detector::DetectedRegions,
     ) -> Result<Vec<i32>> {
-        self.extract_quantities_per_row(image, width, height, regions)
+        self.extract_quantities_template(image, width, height, regions)
     }
 
-    /// Extract quantities using per-row composite images (parallelized).
-    ///
-    /// Builds ONE composite per row for OCR.
-    /// Makes N parallel OCR calls (one per row) using thread-local Tesseract instances.
-    fn extract_quantities_per_row(
+    /// Extract quantities using template-based digit matching (primary method).
+    fn extract_quantities_template(
         &self,
         image: &[u8],
         width: i32,
         height: i32,
         regions: &crate::detector::DetectedRegions,
     ) -> Result<Vec<i32>> {
-        if self.text_extractor.is_none() {
-            return Ok(vec![-1; regions.quantity_boxes.len()]);
-        }
-
-        let box_width = regions.box_width as usize;
-        let box_height = regions.box_height as usize;
-        let scale_factor = regions.scale_factor;
-
         if regions.quantity_boxes.is_empty() {
             return Ok(Vec::new());
         }
@@ -440,159 +414,25 @@ impl ScanPipeline {
             )));
         }
 
-        // Group boxes by row
-        let rows = self.group_boxes_by_row(regions);
+        let box_width = regions.box_width;
+        let box_height = regions.box_height;
+        let scale = regions.scale_factor;
 
-        // Security: Validate row sizes before allocation
-        for (row_idx, row) in rows.iter().enumerate() {
-            if row.len() > MAX_BOXES_PER_ROW {
-                return Err(FsOcrError::Image(format!(
-                    "Row {} has too many boxes: {} (max: {})",
-                    row_idx,
-                    row.len(),
-                    MAX_BOXES_PER_ROW
-                )));
-            }
-        }
+        // Convert RGB image to grayscale for digit matching
+        let grayscale = image_utils::rgb_to_grayscale(image, width as usize, height as usize);
 
-        // Step 1: Build all row composites (parallel)
-        let row_data: Vec<(Vec<u8>, usize, usize, Vec<usize>)> = rows
-            .par_iter()
-            .filter(|row| !row.is_empty())
-            .map(|row| {
-                let gap = 20usize;
-                let row_composite_width =
-                    row.len() * box_width + (row.len().saturating_sub(1)) * gap;
-                let mut row_composite = vec![0u8; row_composite_width * box_height * 3];
-
-                let mut x_offset = 0usize;
-                for &(_, qx, qy) in row {
-                    for dy in 0..box_height {
-                        for dx in 0..box_width {
-                            let src_x = qx as usize + dx;
-                            let src_y = qy as usize + dy;
-
-                            if src_x < (width as usize) && src_y < (height as usize) {
-                                let src_idx = (src_y * width as usize + src_x) * 3;
-                                let dst_idx = (dy * row_composite_width + x_offset + dx) * 3;
-
-                                if src_idx + 2 < image.len() && dst_idx + 2 < row_composite.len() {
-                                    row_composite[dst_idx] = image[src_idx];
-                                    row_composite[dst_idx + 1] = image[src_idx + 1];
-                                    row_composite[dst_idx + 2] = image[src_idx + 2];
-                                }
-                            }
-                        }
-                    }
-                    x_offset += box_width + gap;
-                }
-
-                // Preprocess
-                let (processed, proc_w, proc_h) = preprocess_quantity_composite(
-                    &row_composite,
-                    row_composite_width,
-                    box_height,
-                    3,
-                    scale_factor,
-                );
-
-                // Collect original indices
-                let indices: Vec<usize> = row.iter().map(|&(idx, _, _)| idx).collect();
-
-                (processed, proc_w, proc_h, indices)
-            })
-            .collect();
-
-        // Step 2: Run OCR in parallel using thread-local TextExtractor instances
-        use std::cell::RefCell;
-        thread_local! {
-            static THREAD_EXTRACTOR: RefCell<Option<crate::ocr::TextExtractor>> = const { RefCell::new(None) };
-        }
-
-        let tessdata_path = self.tessdata_path.clone();
-        let ocr_results: Vec<(Vec<i32>, Vec<usize>)> = row_data
-            .par_iter()
-            .map(|(processed, proc_w, proc_h, indices)| {
-                // Use thread-local TextExtractor instance (lazy init)
-                THREAD_EXTRACTOR.with(|cell| {
-                    let mut extractor_opt = cell.borrow_mut();
-                    if extractor_opt.is_none() {
-                        *extractor_opt = crate::ocr::TextExtractor::new(
-                            &tessdata_path,
-                            "renner_numbers",
-                        )
-                        .ok();
-                    }
-
-                    let extractor = match extractor_opt.as_ref() {
-                        Some(e) => e,
-                        None => return (vec![-1i32; indices.len()], indices.clone()),
-                    };
-
-                    let text = match extractor.extract_text(
-                        processed,
-                        *proc_w as i32,
-                        *proc_h as i32,
-                        1,
-                    ) {
-                        Ok(t) => t,
-                        Err(_) => return (vec![-1i32; indices.len()], indices.clone()),
-                    };
-
-                    let parsed = crate::ocr::quantity::parse_quantity_text(&text);
-                    let parsed_flat: Vec<i32> = parsed.into_iter().flatten().collect();
-
-                    (parsed_flat, indices.clone())
-                })
-            })
-            .collect();
-
-        // Step 3: Merge results
-        let mut quantities = vec![-1i32; regions.quantity_boxes.len()];
-        for (parsed, indices) in ocr_results {
-            for (i, &orig_idx) in indices.iter().enumerate() {
-                if i < parsed.len() {
-                    quantities[orig_idx] = parsed[i];
-                }
-            }
-        }
+        // Use template-based digit matching
+        let quantities = digit_matcher::recognize_quantities_batch(
+            &grayscale,
+            width,
+            height,
+            &regions.quantity_boxes,
+            box_width,
+            box_height,
+            scale,
+        );
 
         Ok(quantities)
-    }
-
-    /// Group quantity boxes by row (shared helper for both methods).
-    fn group_boxes_by_row(
-        &self,
-        regions: &crate::detector::DetectedRegions,
-    ) -> Vec<Vec<(usize, i32, i32)>> {
-        let box_height = regions.box_height as usize;
-        let row_tolerance = box_height / 2;
-        let mut rows: Vec<Vec<(usize, i32, i32)>> = Vec::new();
-
-        for (idx, &(qx, qy)) in regions.quantity_boxes.iter().enumerate() {
-            let mut found_row = false;
-            for row in &mut rows {
-                if !row.is_empty() {
-                    let row_y = row[0].2;
-                    if (qy - row_y).unsigned_abs() as usize <= row_tolerance {
-                        row.push((idx, qx, qy));
-                        found_row = true;
-                        break;
-                    }
-                }
-            }
-            if !found_row {
-                rows.push(vec![(idx, qx, qy)]);
-            }
-        }
-
-        // Sort rows by Y, and boxes within each row by X
-        rows.sort_by_key(|row| row.first().map(|&(_, _, y)| y).unwrap_or(0));
-        for row in &mut rows {
-            row.sort_by_key(|&(_, x, _)| x);
-        }
-
-        rows
     }
 
     /// Match detected icons to templates with group-based category detection.
@@ -663,20 +503,24 @@ impl ScanPipeline {
             self.config.ncc_tiebreaker_threshold,
         );
 
-        // Step 2: Process groups with category detection
+        // Step 2: Two-phase matching for better parallelization
+        // Phase 1: Match first N items of each group sequentially (for category detection)
+        // Phase 2: Match remaining items in parallel (with detected category)
         let total_items = icons_data.len();
         let mut items: Vec<StockpileItem> = vec![StockpileItem::unknown(-1, false); total_items];
 
+        // Collect items for parallel processing and detected categories per group
+        let mut parallel_items: Vec<(usize, Option<ItemCategory>)> = Vec::new();
+
         for (group_idx, group) in regions.groups.iter().enumerate() {
-            // Number of items to match without category filter
             let filter_start = if group_idx == 0 { 2 } else { 5 };
             let unfiltered_count = filter_start.min(group.size);
 
-            // Track detected categories
             let mut category_counts: HashMap<ItemCategory, usize> = HashMap::new();
             let mut detected_category: Option<ItemCategory> = None;
 
-            for i in 0..group.size {
+            // Phase 1: Sequential matching for category detection
+            for i in 0..unfiltered_count.min(group.size) {
                 let item_idx = group.start_index + i;
                 if item_idx >= total_items {
                     break;
@@ -685,35 +529,14 @@ impl ScanPipeline {
                 let (icon, phash, icon_w, icon_h) = &icons_data[item_idx];
                 let quantity = quantities.get(item_idx).copied().unwrap_or(-1);
 
-                // Use category filter after first N items
-                let category = if i >= unfiltered_count {
-                    detected_category
-                } else {
-                    None
-                };
-
-                // Match this icon
-                let filter = MatchFilter::new().faction(faction).category(category);
+                let filter = MatchFilter::new().faction(faction);
                 let result = matcher.match_icon_with_phash(icon, *icon_w, *icon_h, *phash, &filter);
 
                 let item = match result {
                     Ok(match_result) if match_result.best_match.is_some() => {
                         let template = match_result.best_match.as_ref().unwrap();
+                        *category_counts.entry(template.category).or_insert(0) += 1;
 
-                        // Track category for future items
-                        if i < unfiltered_count {
-                            *category_counts.entry(template.category).or_insert(0) += 1;
-
-                            // Detect category after collecting enough samples
-                            if category_counts.values().sum::<usize>() >= unfiltered_count {
-                                detected_category = category_counts
-                                    .iter()
-                                    .max_by_key(|(_, count)| *count)
-                                    .map(|(cat, _)| *cat);
-                            }
-                        }
-
-                        // Convert gap candidates
                         let candidates = if match_result.gap_candidates.is_empty() {
                             None
                         } else {
@@ -742,6 +565,71 @@ impl ScanPipeline {
 
                 items[item_idx] = item;
             }
+
+            // Detect category from first N items
+            if !category_counts.is_empty() {
+                detected_category = category_counts
+                    .iter()
+                    .max_by_key(|(_, count)| *count)
+                    .map(|(cat, _)| *cat);
+            }
+
+            // Collect remaining items for parallel processing
+            for i in unfiltered_count..group.size {
+                let item_idx = group.start_index + i;
+                if item_idx < total_items {
+                    parallel_items.push((item_idx, detected_category));
+                }
+            }
+        }
+
+        // Phase 2: Parallel matching for remaining items
+        let parallel_results: Vec<(usize, StockpileItem)> = parallel_items
+            .par_iter()
+            .map(|&(item_idx, category)| {
+                let (icon, phash, icon_w, icon_h) = &icons_data[item_idx];
+                let quantity = quantities.get(item_idx).copied().unwrap_or(-1);
+
+                let filter = MatchFilter::new().faction(faction).category(category);
+                let result = matcher.match_icon_with_phash(icon, *icon_w, *icon_h, *phash, &filter);
+
+                let item = match result {
+                    Ok(match_result) if match_result.best_match.is_some() => {
+                        let template = match_result.best_match.as_ref().unwrap();
+
+                        let candidates = if match_result.gap_candidates.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                match_result
+                                    .gap_candidates
+                                    .iter()
+                                    .map(|(t, conf)| ItemCandidate::new(t.code.clone(), *conf))
+                                    .collect(),
+                            )
+                        };
+
+                        StockpileItem::new(
+                            template.code.clone(),
+                            quantity,
+                            template.crated,
+                            match_result.confidence,
+                            candidates,
+                        )
+                    }
+                    _ => {
+                        let crated = item_idx >= regions.groups.first().map(|g| g.size).unwrap_or(0);
+                        StockpileItem::unknown(quantity, crated)
+                    }
+                };
+
+                (item_idx, item)
+            })
+            .collect();
+
+        // Merge parallel results
+        for (item_idx, item) in parallel_results {
+            items[item_idx] = item;
         }
 
         Ok(items)
@@ -779,9 +667,9 @@ impl ScanPipeline {
         &self.database_path
     }
 
-    /// Get the tessdata path.
-    pub fn tessdata_path(&self) -> &str {
-        &self.tessdata_path
+    /// Get the data path (OCR models directory).
+    pub fn data_path(&self) -> &str {
+        &self.data_path
     }
 
     /// Detect stockpile regions using hybrid approach: black box for ROI, then grey mask.
@@ -1091,7 +979,7 @@ mod tests {
     fn test_detect_crated_from_group() {
         use crate::detector::GroupInfo;
 
-        let pipeline = ScanPipeline::new("db.h5", "tessdata", ScanConfig::default());
+        let pipeline = ScanPipeline::new("db.h5", "data", ScanConfig::default());
         let groups = vec![
             GroupInfo::new(3, 0), // First group: items 0-2
             GroupInfo::new(5, 3), // Second group: items 3-7

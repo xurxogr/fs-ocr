@@ -31,9 +31,9 @@ impl OcrConfig {
     }
 
     /// Create config for single-line text.
-    pub fn for_text_line(model: &str) -> Self {
+    pub fn for_text_line(data_path: &str, model: &str) -> Self {
         Self {
-            data_path: String::new(),
+            data_path: data_path.to_string(),
             model_name: model.to_string(),
             psm: 7,
             whitelist: String::new(),
@@ -41,9 +41,9 @@ impl OcrConfig {
     }
 
     /// Create config for text block (multi-line).
-    pub fn for_text_block(model: &str) -> Self {
+    pub fn for_text_block(data_path: &str, model: &str) -> Self {
         Self {
-            data_path: String::new(),
+            data_path: data_path.to_string(),
             model_name: model.to_string(),
             psm: 6,
             whitelist: String::new(),
@@ -88,8 +88,9 @@ mod tests {
 
     #[test]
     fn test_ocr_config_for_text() {
-        let config = OcrConfig::for_text_line("eng");
+        let config = OcrConfig::for_text_line("data", "eng");
         assert_eq!(config.model_name, "eng");
+        assert_eq!(config.data_path, "data");
         assert!(config.whitelist.is_empty());
         assert_eq!(config.psm, 7);
     }

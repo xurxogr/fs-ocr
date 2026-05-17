@@ -7,6 +7,7 @@
 //! Build with `--features ocr-full` to enable Tesseract backend.
 
 pub mod basic;
+pub mod digit_matcher;
 pub mod engine;
 pub mod preprocess;
 pub mod quantity;
@@ -40,8 +41,8 @@ pub fn create_quantity_engine(data_path: &str) -> Option<Box<dyn OcrEngine>> {
 }
 
 /// Create an OCR engine for single-line text.
-pub fn create_text_engine(_model: &str) -> Option<Box<dyn OcrEngine>> {
-    let config = OcrConfig::for_text_line("eng");
+pub fn create_text_engine(data_path: &str, _model: &str) -> Option<Box<dyn OcrEngine>> {
+    let config = OcrConfig::for_text_line(data_path, "eng");
     match OcrsEngine::new(config) {
         Ok(engine) if engine.is_available() => Some(Box::new(engine)),
         _ => None,
@@ -49,8 +50,8 @@ pub fn create_text_engine(_model: &str) -> Option<Box<dyn OcrEngine>> {
 }
 
 /// Create an OCR engine for multi-line text blocks.
-pub fn create_block_engine(_model: &str) -> Option<Box<dyn OcrEngine>> {
-    let config = OcrConfig::for_text_block("eng");
+pub fn create_block_engine(data_path: &str, _model: &str) -> Option<Box<dyn OcrEngine>> {
+    let config = OcrConfig::for_text_block(data_path, "eng");
     match OcrsEngine::new(config) {
         Ok(engine) if engine.is_available() => Some(Box::new(engine)),
         _ => None,
@@ -89,7 +90,7 @@ mod ocrs_extractor {
         /// Create for text (no whitelist).
         pub fn new_for_text<P: AsRef<std::path::Path>>(data_path: P, model_name: &str) -> crate::error::Result<Self> {
             let path = data_path.as_ref().to_string_lossy().to_string();
-            let config = OcrConfig::for_text_line(model_name);
+            let config = OcrConfig::for_text_line(&path, model_name);
             let engine = OcrsEngine::new(config).ok();
             Ok(Self {
                 engine,
@@ -100,17 +101,19 @@ mod ocrs_extractor {
 
         /// Create using system default data path.
         pub fn new_for_text_default(model_name: &str) -> crate::error::Result<Self> {
-            Self::new_for_text("", model_name)
+            // Use "data" as default path for ocrs models
+            Self::new_for_text("data", model_name)
         }
 
         /// Create for multi-line text.
         pub fn new_for_text_block_default(model_name: &str) -> crate::error::Result<Self> {
-            let config = OcrConfig::for_text_block(model_name);
+            // Use "data" as default path for ocrs models
+            let config = OcrConfig::for_text_block("data", model_name);
             let engine = OcrsEngine::new(config).ok();
             Ok(Self {
                 engine,
                 model_name: model_name.to_string(),
-                data_path: String::new(),
+                data_path: "data".to_string(),
             })
         }
 
@@ -145,7 +148,7 @@ mod ocrs_extractor {
         }
 
         /// Get the data path.
-        pub fn tessdata_path(&self) -> &str {
+        pub fn data_path(&self) -> &str {
             &self.data_path
         }
 

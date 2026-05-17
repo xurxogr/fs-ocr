@@ -552,8 +552,6 @@ impl GreyMaskDetector {
 
         // Title region calculations
         let title_min_x = first_icon_x - self.title_margin / 2;
-        let title_y = roi_y;
-
         let title_max_x = (max_detected_x + self.box_width + self.title_margin)
             .max(title_min_x + self.title_min_width);
 

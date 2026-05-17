@@ -63,7 +63,8 @@ pub const PHASH_THRESHOLD: u32 = 15;
 
 /// Maximum candidates to evaluate with NCC after pHash filtering.
 /// Note: 25 was too few - some icons need more candidates to find correct match.
-pub const MAX_NCC_CANDIDATES: usize = 50;
+/// Reduced from 50 to 30 for better performance with acceptable accuracy.
+pub const MAX_NCC_CANDIDATES: usize = 30;
 
 /// NCC tiebreaker threshold.
 /// When top matches are within this threshold, use edge-based comparison.

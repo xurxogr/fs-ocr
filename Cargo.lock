@@ -468,6 +468,7 @@ dependencies = [
  "pyo3",
  "rayon",
  "rten",
+ "rten-imageproc",
  "serde",
  "serde_json",
  "tempfile",

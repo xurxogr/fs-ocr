@@ -34,6 +34,7 @@ hdf5 = "0.8"
 # Pure Rust OCR (ocrs) - always included
 ocrs = "0.11"
 rten = "0.22"
+rten-imageproc = "0.22"
 
 # Full OCR with Tesseract (optional, requires system installation)
 leptess = { version = "0.14", optional = true }

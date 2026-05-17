@@ -100,14 +100,14 @@ impl StockpileScanner {
     ///
     /// Args:
     ///     database_path: Path to the HDF5 template database.
-    ///     tessdata_path: Path to the tessdata directory (default: "tessdata").
+    ///     data_path: Path to the OCR models directory (default: "data").
     ///
     /// Returns:
     ///     A new StockpileScanner instance.
     #[new]
-    #[pyo3(signature = (database_path, tessdata_path=None))]
-    pub fn new(database_path: &str, tessdata_path: Option<&str>) -> PyResult<Self> {
-        let tessdata = tessdata_path.unwrap_or("tessdata");
+    #[pyo3(signature = (database_path, data_path=None))]
+    pub fn new(database_path: &str, data_path: Option<&str>) -> PyResult<Self> {
+        let data_dir = data_path.unwrap_or("data");
 
         // Validate database path extension (security: prevent loading arbitrary files)
         validate_database_path(database_path)
@@ -122,7 +122,7 @@ impl StockpileScanner {
         }
 
         let config = ScanConfig::default();
-        let pipeline = ScanPipeline::new(database_path, tessdata, config);
+        let pipeline = ScanPipeline::new(database_path, data_dir, config);
 
         Ok(Self { pipeline })
     }
@@ -318,6 +318,63 @@ impl StockpileScanner {
         })
     }
 
+    /// Debug: Recognize quantities using template matching (no OCR).
+    ///
+    /// Returns a list of recognized quantities for each detected box.
+    /// Uses pure template matching against digit patterns.
+    #[pyo3(signature = (image,))]
+    pub fn debug_recognize_quantities_template(
+        &self,
+        image: PyReadonlyArray3<u8>,
+    ) -> PyResult<Vec<i32>> {
+        let shape = image.shape();
+        let height = shape[0] as i32;
+        let width = shape[1] as i32;
+        let image_data = image.as_slice()?;
+
+        // Convert RGB to grayscale
+        let grayscale = crate::image_utils::rgb_to_grayscale(image_data, width as usize, height as usize);
+
+        // Get quantity boxes
+        let bb_detector = BlackBoxDetector::new(width, height);
+        let bb_result = bb_detector
+            .detect(image_data, width, height)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let (roi_x, roi_y, roi_w, roi_h) = match bb_result {
+            Some(r) => r.roi,
+            None => return Ok(Vec::new()),
+        };
+
+        let detector = GreyMaskDetector::new(width, height);
+        let mut regions = detector
+            .detect_roi_fast(image_data, width, height, roi_x, roi_y, roi_w, roi_h)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        // Adjust coordinates
+        for (x, y) in &mut regions.quantity_boxes {
+            *x += roi_x;
+            *y += roi_y;
+        }
+
+        let scale = height as f64 / 2160.0;
+        let box_width = (84.0 * scale) as i32;
+        let box_height = (64.0 * scale) as i32;
+
+        // Recognize using template matching
+        let quantities = ocr::digit_matcher::recognize_quantities_batch(
+            &grayscale,
+            width,
+            height,
+            &regions.quantity_boxes,
+            box_width,
+            box_height,
+            scale,
+        );
+
+        Ok(quantities)
+    }
+
     /// Scan a stockpile screenshot from file path.
     ///
     /// Args:
@@ -374,9 +431,9 @@ impl StockpileScanner {
         self.pipeline.database_path()
     }
 
-    /// Get the tessdata path.
-    pub fn tessdata_path(&self) -> &str {
-        self.pipeline.tessdata_path()
+    /// Get the data path (OCR models directory).
+    pub fn data_path(&self) -> &str {
+        self.pipeline.data_path()
     }
 
     /// Preload the database and OCR engines for fast subsequent scans.
@@ -389,7 +446,7 @@ impl StockpileScanner {
     ///                 Use 2160 to preload 4K templates.
     ///
     /// Example:
-    ///     scanner = StockpileScanner("templates.h5", "tessdata")
+    ///     scanner = StockpileScanner("templates.h5", "data")
     ///     scanner.preload(2160)  # Load 4K templates at startup
     ///     # Now all scans will be fast
     #[pyo3(signature = (resolution=2160))]
@@ -406,9 +463,9 @@ impl StockpileScanner {
 
     fn __repr__(&self) -> String {
         format!(
-            "StockpileScanner(database='{}', tessdata='{}')",
+            "StockpileScanner(database='{}', data='{}')",
             self.pipeline.database_path(),
-            self.pipeline.tessdata_path()
+            self.pipeline.data_path()
         )
     }
 }
