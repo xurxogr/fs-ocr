@@ -379,15 +379,28 @@ impl ScanPipeline {
                     let (processed, proc_w, proc_h) =
                         preprocess_light_text(&name_img, w as usize, h as usize, scale_factor, 4.0);
 
-                    if let Ok(text) = extractor.extract_text(
-                        &processed,
-                        proc_w as i32,
-                        proc_h as i32,
-                        1, // grayscale
-                    ) {
-                        let name = text.trim();
+                    // Split into lines if multiline, OCR each, then join
+                    let lines = split_text_lines(&processed, proc_w, proc_h);
+                    let mut line_texts: Vec<String> = Vec::new();
+
+                    for (line_img, line_w, line_h) in &lines {
+                        if let Ok(text) = extractor.extract_text(
+                            line_img,
+                            *line_w as i32,
+                            *line_h as i32,
+                            1, // grayscale
+                        ) {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                line_texts.push(trimmed.to_string());
+                            }
+                        }
+                    }
+
+                    if !line_texts.is_empty() {
+                        let name = join_multiline_name(&line_texts.join("\n"));
                         if !name.is_empty() {
-                            stockpile.name = Some(name.to_string());
+                            stockpile.name = Some(name);
                         }
                     }
                 }
@@ -795,6 +808,116 @@ fn extract_region(
     }
 
     region
+}
+
+/// Split multiline text into separate line images.
+/// Returns a vector of (image, width, height) tuples, one per line.
+fn split_text_lines(image: &[u8], width: usize, height: usize) -> Vec<(Vec<u8>, usize, usize)> {
+    // Find vertical bounds of text (bright pixels > 200)
+    let mut min_y = height;
+    let mut max_y = 0;
+    for y in 0..height {
+        for x in 0..width {
+            if image[y * width + x] > 200 {
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+
+    let text_height = if max_y >= min_y { max_y - min_y + 1 } else { 0 };
+
+    // If text doesn't fill most of height, return as single line
+    if text_height < height * 60 / 100 {
+        return vec![(image.to_vec(), width, height)];
+    }
+
+    // Find the gap between lines: row with fewest bright pixels in the middle region
+    let search_start = min_y + text_height / 4;
+    let search_end = min_y + text_height * 3 / 4;
+
+    let mut min_bright = width + 1;
+    let mut split_y = (search_start + search_end) / 2;
+
+    for y in search_start..search_end {
+        let bright_count = (0..width).filter(|&x| image[y * width + x] > 200).count();
+        if bright_count < min_bright {
+            min_bright = bright_count;
+            split_y = y;
+        }
+    }
+
+    // If no clear gap found (min_bright > 20% of width), return as single line
+    if min_bright > width / 5 {
+        return vec![(image.to_vec(), width, height)];
+    }
+
+    // Extract and tight-crop each line
+    fn extract_tight_line(image: &[u8], width: usize, y_start: usize, y_end: usize) -> (Vec<u8>, usize, usize) {
+        // Find actual text bounds within this line region
+        let mut line_min_y = y_end;
+        let mut line_max_y = y_start;
+        let mut line_min_x = width;
+        let mut line_max_x = 0;
+
+        for y in y_start..y_end {
+            for x in 0..width {
+                if image[y * width + x] > 200 {
+                    line_min_y = line_min_y.min(y);
+                    line_max_y = line_max_y.max(y);
+                    line_min_x = line_min_x.min(x);
+                    line_max_x = line_max_x.max(x);
+                }
+            }
+        }
+
+        if line_max_y < line_min_y || line_max_x < line_min_x {
+            // No text found, return empty
+            return (vec![144u8; 1], 1, 1);
+        }
+
+        // Add small padding
+        let pad = 2;
+        let crop_x = line_min_x.saturating_sub(pad);
+        let crop_y = line_min_y.saturating_sub(pad);
+        let crop_w = (line_max_x - line_min_x + 1 + pad * 2).min(width - crop_x);
+        let crop_h = (line_max_y - line_min_y + 1 + pad * 2).min(y_end - crop_y);
+
+        let mut cropped = vec![144u8; crop_w * crop_h];
+        for y in 0..crop_h {
+            for x in 0..crop_w {
+                cropped[y * crop_w + x] = image[(crop_y + y) * width + crop_x + x];
+            }
+        }
+
+        (cropped, crop_w, crop_h)
+    }
+
+    let top_line = extract_tight_line(image, width, min_y, split_y);
+    let bottom_line = extract_tight_line(image, width, split_y + 1, max_y + 1);
+
+    vec![top_line, bottom_line]
+}
+
+/// Join multiline name text.
+/// If a line ends with '-', concatenate directly; otherwise add a space.
+fn join_multiline_name(text: &str) -> String {
+    let mut result = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if result.is_empty() {
+            result.push_str(trimmed);
+        } else if result.ends_with('-') {
+            result.push_str(trimmed);
+        } else {
+            result.push(' ');
+            result.push_str(trimmed);
+        }
+    }
+    result
 }
 
 /// Preprocess light text on dark background (type, name).
