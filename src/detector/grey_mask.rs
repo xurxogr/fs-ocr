@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use crate::constants::{
     compute_scale_factor, scale_value, BOX_HEIGHT, BOX_WIDTH, COLUMN_OFFSET, GRAY_LOWER,
     GRAY_UPPER, GROUP_OFFSET, ICON_TO_QUANTITY_OFFSET, PIXEL_DIFF_TOLERANCE, ROW_OFFSET,
-    SHARD_WIDTH_FACTOR, STOCKPILE_NAME_WIDTH_FACTOR, STOCKPILE_TYPE_WIDTH_FACTOR, TITLE_HEIGHT,
-    TITLE_MARGIN, TITLE_MIN_WIDTH,
+    SAMPLE_RATE_BASE, SHARD_WIDTH_FACTOR, STOCKPILE_NAME_WIDTH_FACTOR, STOCKPILE_TYPE_WIDTH_FACTOR,
+    TITLE_HEIGHT, TITLE_MARGIN, TITLE_MIN_WIDTH,
 };
 use crate::error::{FsOcrError, Result};
 
@@ -193,16 +193,42 @@ impl GreyMaskDetector {
         let rw = roi_w as usize;
         let rh = roi_h as usize;
 
-        // Create mask using fixed threshold of 14
-        // Works for all image types:
-        // - Normal: black=0-5, boxes=76-80 → 76 > 14 ✓
-        // - Dark: black=0-1, boxes=79-80 → 79 > 14 ✓
-        // - Gamma dark: black=0, boxes=15 → 15 > 14 ✓
-        // - Light: black=0-2, boxes=166-167 → 166 > 14 ✓
-        const BOX_THRESHOLD: u8 = 14;
-        let mask = self.create_threshold_mask_roi(image, iw, rx, ry, rw, rh, BOX_THRESHOLD);
+        // Sample horizontal rows to find grey box values (low chroma pixels)
+        // Icons are colored (high chroma), boxes are grey (low chroma)
+        // Sample bottom half of ROI, using same rate as ROI detector
+        let sample_rate = (scale_value(SAMPLE_RATE_BASE, self.scale_factor) as usize).max(5);
+        let half_h = rh / 2;
+        let mut grey_samples: Vec<u8> = Vec::with_capacity(rw * (half_h / sample_rate + 1));
 
-        // Step 3: Find contours directly (no morphology - higher threshold keeps boxes separated)
+        for row_offset in (half_h..rh).step_by(sample_rate) {
+            let y = ry + row_offset;
+            for dx in 0..rw {
+                let x = rx + dx;
+                let idx = (y * iw + x) * 3;
+                let r = image[idx];
+                let g = image[idx + 1];
+                let b = image[idx + 2];
+                let chroma = r.max(g).max(b) - r.min(g).min(b);
+                // Low chroma = grey (box), high chroma = colored (icon)
+                if chroma <= 24 && r > 14 {
+                    let grey = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+                    grey_samples.push(grey);
+                }
+            }
+        }
+
+        // Use (median - margin) as threshold to exclude icon edges
+        let threshold = if grey_samples.len() >= 10 {
+            grey_samples.sort_unstable();
+            let median = grey_samples[grey_samples.len() / 2];
+            median.saturating_sub(15).max(14)
+        } else {
+            14u8
+        };
+
+        let mask = self.create_threshold_mask_roi(image, iw, rx, ry, rw, rh, threshold);
+
+        // Step 3: Find contours
         let contours = find_contours(&mask, rw, rh);
 
         // Step 4: Filter contours by size
@@ -256,6 +282,9 @@ impl GreyMaskDetector {
         roi_h: usize,
         threshold: u8,
     ) -> Vec<u8> {
+        // Max chroma for grey pixels (excludes colored icons)
+        const MAX_CHROMA: u8 = 24;
+
         (0..roi_h)
             .into_par_iter()
             .flat_map(|dy| {
@@ -268,8 +297,16 @@ impl GreyMaskDetector {
                         let g = image[idx + 1];
                         let b = image[idx + 2];
 
-                        // All channels must exceed threshold to exclude noise pixels
-                        if r > threshold && g > threshold && b > threshold {
+                        // Check brightness threshold
+                        let bright_enough = r > threshold && g > threshold && b > threshold;
+
+                        // Check low chroma (grey, not colored)
+                        let max_rgb = r.max(g).max(b);
+                        let min_rgb = r.min(g).min(b);
+                        let chroma = max_rgb - min_rgb;
+                        let is_grey = chroma <= MAX_CHROMA;
+
+                        if bright_enough && is_grey {
                             255u8
                         } else {
                             0u8

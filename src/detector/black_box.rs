@@ -6,6 +6,7 @@
 
 use crate::constants::{
     compute_scale_factor, scale_value, BOX_HEIGHT, PIXEL_DIFF_TOLERANCE, ROW_OFFSET,
+    SAMPLE_RATE_BASE,
 };
 
 use crate::error::Result;
@@ -14,6 +15,10 @@ use super::geometry::BoundingRect;
 
 /// Threshold for dark pixel detection (RGB values 0-15).
 const BLACK_THRESHOLD: u8 = 15;
+
+/// Width tolerance for bar detection (accounts for sampling jitter).
+/// Higher than PIXEL_DIFF_TOLERANCE to catch bars missed by sparse sampling.
+const WIDTH_TOLERANCE: i32 = 5;
 
 /// Minimum width for black box at 2160p base resolution.
 const MIN_WIDTH_2160: i32 = 600;
@@ -79,15 +84,16 @@ impl BlackBoxDetector {
         // row_gap = ROW_OFFSET - BOX_HEIGHT = 14px at 2160p
         let row_gap = row_offset - box_height;
 
-        // Width: 600-1200px at 2160p, scaled with PIXEL_DIFF_TOLERANCE
-        let min_width = scale_value(MIN_WIDTH_2160, scale_factor) - PIXEL_DIFF_TOLERANCE;
-        let max_width = scale_value(MAX_WIDTH_2160, scale_factor) + PIXEL_DIFF_TOLERANCE;
+        // Width: 600-1200px at 2160p, scaled with WIDTH_TOLERANCE
+        // Uses larger tolerance than pixel alignment to catch bars missed by sampling
+        let min_width = scale_value(MIN_WIDTH_2160, scale_factor) - WIDTH_TOLERANCE;
+        let max_width = scale_value(MAX_WIDTH_2160, scale_factor) + WIDTH_TOLERANCE;
 
         // Target height: row_gap + row_offset = 92px at 2160p
         let target_height = row_gap + row_offset;
 
         // Sample rate: 10 at 2160p, scaled down for lower resolutions (min 5)
-        let sample_rate = ((10.0 * scale_factor) as usize).max(5);
+        let sample_rate = (scale_value(SAMPLE_RATE_BASE, scale_factor) as usize).max(5);
 
         Self {
             scale_factor,
@@ -369,15 +375,15 @@ mod tests {
 
     #[test]
     fn test_width_constraints() {
-        // At 2160p, width should be 598-1202 (600-1200 ± 2)
+        // At 2160p, width should be 595-1205 (600-1200 ± 5)
         let detector = BlackBoxDetector::new(3840, 2160);
-        assert_eq!(detector.min_width, 598);
-        assert_eq!(detector.max_width, 1202);
+        assert_eq!(detector.min_width, 595);
+        assert_eq!(detector.max_width, 1205);
 
-        // At 1080p, width should be 298-602 (scaled by 0.5)
+        // At 1080p, width should be 295-605 (scaled by 0.5, ± 5)
         let detector = BlackBoxDetector::new(1920, 1080);
-        assert_eq!(detector.min_width, 298);
-        assert_eq!(detector.max_width, 602);
+        assert_eq!(detector.min_width, 295);
+        assert_eq!(detector.max_width, 605);
     }
 
     #[test]

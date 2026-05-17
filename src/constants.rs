@@ -52,6 +52,9 @@ pub const PIXEL_DIFF_TOLERANCE: i32 = 2;
 /// Margin for adaptive grey thresholding.
 pub const ADAPTIVE_MARGIN: u8 = 5;
 
+/// Base sample rate for row scanning at 2160p (scales with resolution).
+pub const SAMPLE_RATE_BASE: i32 = 10;
+
 // =============================================================================
 // Template Matching
 // =============================================================================
