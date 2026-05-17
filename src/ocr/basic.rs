@@ -131,15 +131,8 @@ impl OcrEngine for OcrsEngine {
             None => return Ok(String::new()),
         };
 
-        // Convert grayscale to single-channel format for ocrs
-        // Boost contrast: ensure minimum brightness for better OCR
-        let processed: Vec<u8> = image
-            .iter()
-            .map(|&g| g.max(128))
-            .collect();
-
         // Create ImageSource and prepare input
-        let img_source = match ImageSource::from_bytes(&processed, (width as u32, height as u32)) {
+        let img_source = match ImageSource::from_bytes(image, (width as u32, height as u32)) {
             Ok(src) => src,
             Err(e) => {
                 return Err(FsOcrError::Ocr(format!(

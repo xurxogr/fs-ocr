@@ -20,7 +20,7 @@ use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
 use crate::image_utils;
 use crate::models::{ItemCandidate, Stockpile, StockpileItem};
-use crate::ocr::{digit_matcher, TextExtractor};
+use crate::ocr::{digit_matcher, preprocess, OcrEngine, TextExtractor};
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, TemplateMatcher};
 use crate::template::phash::compute_phash;
@@ -35,10 +35,10 @@ pub struct ScanPipeline {
     config: ScanConfig,
     /// Loaded template database (cached).
     database: Option<Arc<TemplateDatabase>>,
-    /// Text extractor for single-line text OCR (type, name - PSM 7).
-    text_extractor_eng: Option<TextExtractor>,
-    /// Text extractor for multi-line text OCR (shard region - PSM 6).
-    text_extractor_eng_block: Option<TextExtractor>,
+    /// Internal OCR engine for shard/timestamp (always ocrs, Latin-only is fine).
+    shard_extractor: Option<crate::ocr::OcrsEngine>,
+    /// Text extractor for type/name (Tesseract if ocr-full, otherwise ocrs).
+    text_extractor: Option<TextExtractor>,
 }
 
 impl ScanPipeline {
@@ -49,8 +49,8 @@ impl ScanPipeline {
             data_path: data_path.as_ref().to_string_lossy().to_string(),
             config,
             database: None,
-            text_extractor_eng: None,
-            text_extractor_eng_block: None,
+            shard_extractor: None,
+            text_extractor: None,
         }
     }
 
@@ -67,34 +67,37 @@ impl ScanPipeline {
             self.database = Some(Arc::new(db));
         }
 
-        // Initialize multilingual text extractor for single-line text (type, name - PSM 7)
-        // Supports English, Chinese, and Russian stockpile names
-        if self.text_extractor_eng.is_none() {
-            // Use system default for Tesseract if ocr-full is enabled
-            // Try multilingual first, fall back to English only
-            match TextExtractor::new_for_text_default("eng+chi_sim+rus") {
-                Ok(extractor) => self.text_extractor_eng = Some(extractor),
-                Err(_) => {
-                    // Fall back to English only if multilingual fails
-                    match TextExtractor::new_for_text_default("eng") {
-                        Ok(extractor) => self.text_extractor_eng = Some(extractor),
-                        Err(e) => {
-                            eprintln!("Warning: Failed to initialize text OCR: {}", e);
-                        }
-                    }
+        // Initialize shard extractor (always use internal ocrs - Latin only is fine)
+        // Shard names are: "ABLE", "CHARLIE", "Devbranch"
+        // Timestamp is just numbers: [0-9]+,[0-9]{4}
+        if self.shard_extractor.is_none() {
+            let config = crate::ocr::OcrConfig::for_text_line(&self.data_path, "eng");
+            match crate::ocr::OcrsEngine::new(config) {
+                Ok(engine) if engine.is_available() => {
+                    self.shard_extractor = Some(engine);
+                }
+                Ok(_) => {
+                    eprintln!("Warning: ocrs model not available for shard extraction");
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to initialize shard OCR: {}", e);
                 }
             }
         }
 
-        // Initialize multilingual text extractor for multi-line text (shard region - PSM 6)
-        if self.text_extractor_eng_block.is_none() {
-            match TextExtractor::new_for_text_block_default("eng+chi_sim+rus") {
-                Ok(extractor) => self.text_extractor_eng_block = Some(extractor),
+        // Initialize text extractor for type/name
+        // Uses Tesseract with multilingual support if ocr-full feature is enabled
+        // Otherwise falls back to ocrs (Latin only)
+        if self.text_extractor.is_none() {
+            // Try multilingual first (only works with Tesseract/ocr-full)
+            match TextExtractor::new_for_text_default("eng+chi_sim+rus") {
+                Ok(extractor) => self.text_extractor = Some(extractor),
                 Err(_) => {
-                    match TextExtractor::new_for_text_block_default("eng") {
-                        Ok(extractor) => self.text_extractor_eng_block = Some(extractor),
+                    // Fall back to English only
+                    match TextExtractor::new_for_text_default("eng") {
+                        Ok(extractor) => self.text_extractor = Some(extractor),
                         Err(e) => {
-                            eprintln!("Warning: Failed to initialize block text OCR: {}", e);
+                            eprintln!("Warning: Failed to initialize text OCR: {}", e);
                         }
                     }
                 }
@@ -145,7 +148,7 @@ impl ScanPipeline {
         w: i32,
         h: i32,
     ) -> Result<String> {
-        let extractor = match &self.text_extractor_eng {
+        let extractor = match &self.text_extractor {
             Some(e) => e,
             None => return Ok("(OCR not initialized)".to_string()),
         };
@@ -162,7 +165,7 @@ impl ScanPipeline {
         );
 
         let (processed, proc_w, proc_h) =
-            preprocess_for_text(&region_img, w as usize, h as usize, scale_factor);
+            preprocess_light_text(&region_img, w as usize, h as usize, scale_factor, 2.0);
 
         let text = extractor.extract_text(&processed, proc_w as i32, proc_h as i32, 1)?;
         Ok(text)
@@ -270,85 +273,12 @@ impl ScanPipeline {
         regions: &crate::detector::DetectedRegions,
         stockpile: &mut Stockpile,
     ) -> Result<()> {
-        // Use English extractor for text (not numbers)
-        let extractor = match &self.text_extractor_eng {
-            Some(e) => e,
-            None => return Ok(()), // No OCR available
-        };
-
         let scale_factor = regions.scale_factor;
 
-        // Extract stockpile type
+        // Extract stockpile type (may need multilingual support for Chinese/Russian)
         if let Some((x, y, w, h)) = regions.type_region {
-            let type_img = extract_region(
-                image,
-                width as usize,
-                height as usize,
-                x.max(0) as usize,
-                y.max(0) as usize,
-                w as usize,
-                h as usize,
-            );
-
-            // Minimal preprocessing for multilingual OCR (Chinese/Russian/English)
-            // Skip binarization to preserve character details
-            let (processed, proc_w, proc_h) =
-                preprocess_for_text_minimal(&type_img, w as usize, h as usize, scale_factor);
-
-            let text = extractor.extract_text(
-                &processed,
-                proc_w as i32,
-                proc_h as i32,
-                1, // grayscale
-            )?;
-
-            let stockpile_type = StockpileType::from_string(&text);
-            stockpile.stockpile_type = stockpile_type;
-        }
-
-        // Extract shard and ingame timestamp (use block extractor for multi-line text)
-        if let Some((x, y, w, h)) = regions.shard_region {
-            // Use block extractor (PSM 6) for multi-line shard region
-            let block_extractor = match &self.text_extractor_eng_block {
-                Some(e) => e,
-                None => extractor, // Fall back to single-line if block not available
-            };
-
-            let shard_img = extract_region(
-                image,
-                width as usize,
-                height as usize,
-                x.max(0) as usize,
-                y.max(0) as usize,
-                w as usize,
-                h as usize,
-            );
-
-            // Preprocess for OCR (non-inverted for shard)
-            let (processed, proc_w, proc_h) =
-                preprocess_for_text_no_invert(&shard_img, w as usize, h as usize, scale_factor);
-
-            let text = block_extractor.extract_text(
-                &processed,
-                proc_w as i32,
-                proc_h as i32,
-                1, // grayscale
-            )?;
-
-            // Parse shard and ingame timestamp
-            let lines: Vec<&str> = text.lines().collect();
-            if !lines.is_empty() {
-                stockpile.ingame_timestamp = Some(extract_day_and_hour(lines[0]));
-                if lines.len() > 1 {
-                    stockpile.shard = Some(lines[1].trim().to_string());
-                }
-            }
-        }
-
-        // Extract stockpile name (only for types that support custom names)
-        if stockpile.stockpile_type.has_custom_name() {
-            if let Some((x, y, w, h)) = regions.name_region {
-                let name_img = extract_region(
+            if let Some(extractor) = &self.text_extractor {
+                let type_img = extract_region(
                     image,
                     width as usize,
                     height as usize,
@@ -358,20 +288,108 @@ impl ScanPipeline {
                     h as usize,
                 );
 
-                // Preprocess with extra upscale for better name detection
+                // Minimal preprocessing for OCR (no binarization for multilingual support)
                 let (processed, proc_w, proc_h) =
-                    preprocess_for_text_extra(&name_img, w as usize, h as usize, scale_factor);
+                    preprocess_light_text(&type_img, w as usize, h as usize, scale_factor, 2.0);
 
-                let text = extractor.extract_text(
+                if let Ok(text) = extractor.extract_text(
                     &processed,
                     proc_w as i32,
                     proc_h as i32,
                     1, // grayscale
-                )?;
+                ) {
+                    let stockpile_type = StockpileType::from_string(&text);
+                    stockpile.stockpile_type = stockpile_type;
+                }
+            }
+        }
 
-                let name = text.trim();
-                if !name.is_empty() {
-                    stockpile.name = Some(name.to_string());
+        // Extract shard and ingame timestamp (always use internal ocrs - Latin only)
+        // Region contains 2 lines: timestamp on top, shard name on bottom
+        // Split the region in half vertically and process each separately
+        if let Some((x, y, w, h)) = regions.shard_region {
+            if let Some(engine) = &self.shard_extractor {
+                let half_h = h / 2;
+
+                // Top half: timestamp line ("Day 702, 0304 Hours")
+                let timestamp_img = extract_region(
+                    image,
+                    width as usize,
+                    height as usize,
+                    x.max(0) as usize,
+                    y.max(0) as usize,
+                    w as usize,
+                    half_h as usize,
+                );
+
+                let (processed, proc_w, proc_h) =
+                    preprocess_for_shard(&timestamp_img, w as usize, half_h as usize);
+
+                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32) {
+                    let timestamp = extract_day_and_hour(&text);
+                    if !timestamp.is_empty() {
+                        stockpile.ingame_timestamp = Some(timestamp);
+                    }
+                }
+
+                // Bottom half: shard name ("ABLE", "CHARLIE", "Devbranch")
+                let shard_img = extract_region(
+                    image,
+                    width as usize,
+                    height as usize,
+                    x.max(0) as usize,
+                    (y + half_h).max(0) as usize,
+                    w as usize,
+                    half_h as usize,
+                );
+
+                // Use higher upscaling for small shard text (4x instead of 2x)
+                let (processed, proc_w, proc_h) =
+                    preprocess_for_shard(&shard_img, w as usize, half_h as usize);
+
+                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32) {
+                    let text_upper = text.to_uppercase();
+                    if text_upper.contains("ABLE") {
+                        stockpile.shard = Some("ABLE".to_string());
+                    } else if text_upper.contains("CHARLIE") {
+                        stockpile.shard = Some("CHARLIE".to_string());
+                    } else if text_upper.contains("DEVBRANCH") || text_upper.contains("DEV") {
+                        stockpile.shard = Some("Devbranch".to_string());
+                    }
+                }
+            }
+        }
+
+        // Extract stockpile name (only for types that support custom names)
+        // May need multilingual support for Chinese/Russian names
+        if stockpile.stockpile_type.has_custom_name() {
+            if let Some((x, y, w, h)) = regions.name_region {
+                if let Some(extractor) = &self.text_extractor {
+                    let name_img = extract_region(
+                        image,
+                        width as usize,
+                        height as usize,
+                        x.max(0) as usize,
+                        y.max(0) as usize,
+                        w as usize,
+                        h as usize,
+                    );
+
+                    // Preprocess with extra upscale for better name detection
+                    let (processed, proc_w, proc_h) =
+                        preprocess_light_text(&name_img, w as usize, h as usize, scale_factor, 4.0);
+
+                    if let Ok(text) = extractor.extract_text(
+                        &processed,
+                        proc_w as i32,
+                        proc_h as i32,
+                        1, // grayscale
+                    ) {
+                        let name = text.trim();
+                        if !name.is_empty() {
+                            stockpile.name = Some(name.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -779,143 +797,95 @@ fn extract_region(
     region
 }
 
-/// Preprocess image region for text OCR (inverted for black text on white).
-fn preprocess_for_text(
+/// Preprocess light text on dark background (type, name).
+/// Uses luma.max(144) + tight crop around bright pixels + bilinear upscale.
+///
+/// Args:
+///   upscale_base: Base upscale factor (2.0 for type, 4.0 for name)
+fn preprocess_light_text(
     image: &[u8],
     width: usize,
     height: usize,
     scale_factor: f64,
+    upscale_base: f64,
 ) -> (Vec<u8>, usize, usize) {
-    // Upscale factor: 2 / scale_factor to normalize to 2160p equivalent
-    let upscale = 2.0 / scale_factor;
-    let new_w = ((width as f64) * upscale) as usize;
-    let new_h = ((height as f64) * upscale) as usize;
+    // Convert RGB to grayscale with minimum brightness boost
+    let mut grayscale = Vec::with_capacity(width * height);
+    let mut raw_gray = Vec::with_capacity(width * height);
+    for chunk in image.chunks_exact(3) {
+        let luma = ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128) >> 8) as u8;
+        raw_gray.push(luma);
+        grayscale.push(luma.max(144));
+    }
 
-    // Convert RGB to grayscale
-    let grayscale = image_utils::rgb_to_grayscale(image, width, height);
+    // Find tight bounds around bright pixels (luma > 200)
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0usize;
+    let mut max_y = 0usize;
 
-    // Simple nearest-neighbor upscale
-    let upscaled = upscale_nearest(&grayscale, width, height, new_w, new_h);
+    for y in 0..height {
+        for x in 0..width {
+            if raw_gray[y * width + x] > 200 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
 
-    // Apply Otsu-like threshold with inversion
-    let threshold = image_utils::compute_otsu_threshold(&upscaled);
-    let binary: Vec<u8> = upscaled
-        .iter()
-        .map(|&v| if v < threshold { 255 } else { 0 })
-        .collect();
+    // If no bright pixels found, use full image
+    let upscale = upscale_base / scale_factor;
+    if min_x > max_x || min_y > max_y {
+        let new_w = ((width as f64) * upscale) as usize;
+        let new_h = ((height as f64) * upscale) as usize;
+        let upscaled = preprocess::upscale_bilinear(&grayscale, width, height, new_w, new_h);
+        return (upscaled, new_w, new_h);
+    }
 
-    // Simple dilation (3x3 kernel)
-    let dilated = dilate_3x3(&binary, new_w, new_h);
+    // Add padding around tight bounds
+    let padding = height / 8;
+    let crop_x1 = min_x.saturating_sub(padding);
+    let crop_y1 = min_y.saturating_sub(padding);
+    let crop_x2 = (max_x + 1 + padding).min(width);
+    let crop_y2 = (max_y + 1 + padding).min(height);
+    let crop_w = crop_x2 - crop_x1;
+    let crop_h = crop_y2 - crop_y1;
 
-    (dilated, new_w, new_h)
-}
+    // Extract tight crop from boosted grayscale
+    let mut cropped = Vec::with_capacity(crop_w * crop_h);
+    for y in crop_y1..crop_y2 {
+        for x in crop_x1..crop_x2 {
+            cropped.push(grayscale[y * width + x]);
+        }
+    }
 
-/// Minimal preprocessing for multilingual text (no binarization).
-/// Tesseract handles its own preprocessing better for Chinese/Russian.
-fn preprocess_for_text_minimal(
-    image: &[u8],
-    width: usize,
-    height: usize,
-    scale_factor: f64,
-) -> (Vec<u8>, usize, usize) {
-    let upscale = 2.0 / scale_factor;
-    let new_w = ((width as f64) * upscale) as usize;
-    let new_h = ((height as f64) * upscale) as usize;
-
-    // Convert RGB to grayscale only, let Tesseract handle the rest
-    let grayscale = image_utils::rgb_to_grayscale(image, width, height);
-    let upscaled = upscale_nearest(&grayscale, width, height, new_w, new_h);
+    // Upscale the tight crop
+    let new_w = ((crop_w as f64) * upscale) as usize;
+    let new_h = ((crop_h as f64) * upscale) as usize;
+    let upscaled = preprocess::upscale_bilinear(&cropped, crop_w, crop_h, new_w, new_h);
 
     (upscaled, new_w, new_h)
 }
 
-/// Preprocess image region for text OCR (non-inverted for bright text on dark).
-fn preprocess_for_text_no_invert(
+/// Preprocess for shard/timestamp text.
+/// Converts to grayscale with minimum brightness boost for better OCR.
+fn preprocess_for_shard(
     image: &[u8],
     width: usize,
     height: usize,
-    scale_factor: f64,
 ) -> (Vec<u8>, usize, usize) {
-    let upscale = 2.0 / scale_factor;
-    let new_w = ((width as f64) * upscale) as usize;
-    let new_h = ((height as f64) * upscale) as usize;
+    let mut processed = Vec::with_capacity(width * height);
 
-    let grayscale = image_utils::rgb_to_grayscale(image, width, height);
-    let upscaled = upscale_nearest(&grayscale, width, height, new_w, new_h);
-
-    // Non-inverted threshold (white text on black background -> black text on white)
-    let threshold = image_utils::compute_otsu_threshold(&upscaled);
-    let binary: Vec<u8> = upscaled
-        .iter()
-        .map(|&v| if v > threshold { 255 } else { 0 })
-        .collect();
-
-    let dilated = dilate_3x3(&binary, new_w, new_h);
-
-    (dilated, new_w, new_h)
-}
-
-/// Preprocess with extra upscale (2x more) for name detection.
-fn preprocess_for_text_extra(
-    image: &[u8],
-    width: usize,
-    height: usize,
-    scale_factor: f64,
-) -> (Vec<u8>, usize, usize) {
-    let upscale = 4.0 / scale_factor; // 2x extra upscale
-    let new_w = ((width as f64) * upscale) as usize;
-    let new_h = ((height as f64) * upscale) as usize;
-
-    let grayscale = image_utils::rgb_to_grayscale(image, width, height);
-    let upscaled = upscale_nearest(&grayscale, width, height, new_w, new_h);
-
-    let threshold = image_utils::compute_otsu_threshold(&upscaled);
-    let binary: Vec<u8> = upscaled
-        .iter()
-        .map(|&v| if v < threshold { 255 } else { 0 })
-        .collect();
-
-    let dilated = dilate_3x3(&binary, new_w, new_h);
-
-    (dilated, new_w, new_h)
-}
-
-/// Simple nearest-neighbor upscale for grayscale image.
-fn upscale_nearest(
-    image: &[u8],
-    src_w: usize,
-    src_h: usize,
-    dst_w: usize,
-    dst_h: usize,
-) -> Vec<u8> {
-    let mut result = vec![0u8; dst_w * dst_h];
-    for y in 0..dst_h {
-        for x in 0..dst_w {
-            let src_x = (x * src_w) / dst_w;
-            let src_y = (y * src_h) / dst_h;
-            result[y * dst_w + x] = image[src_y * src_w + src_x];
-        }
+    for chunk in image.chunks_exact(3) {
+        // Standard luma conversion: 0.299*R + 0.587*G + 0.114*B
+        let luma = ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128) >> 8) as u8;
+        // Boost minimum brightness to help OCR recognize bright text on dark backgrounds
+        processed.push(luma.max(144));
     }
-    result
-}
 
-/// Simple 3x3 dilation for binary image.
-fn dilate_3x3(image: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let mut result = vec![0u8; width * height];
-    for y in 0..height {
-        for x in 0..width {
-            let mut max_val = 0u8;
-            for dy in 0i32..3 {
-                for dx in 0i32..3 {
-                    let ny = (y as i32 + dy - 1).max(0).min(height as i32 - 1) as usize;
-                    let nx = (x as i32 + dx - 1).max(0).min(width as i32 - 1) as usize;
-                    max_val = max_val.max(image[ny * width + nx]);
-                }
-            }
-            result[y * width + x] = max_val;
-        }
-    }
-    result
+    (processed, width, height)
 }
 
 /// Extract day and hour from in-game timestamp text.
