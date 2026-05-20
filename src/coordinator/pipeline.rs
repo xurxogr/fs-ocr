@@ -405,6 +405,14 @@ impl ScanPipeline {
                     }
                 }
             }
+
+            stockpile.is_reserved = match &stockpile.name {
+                None => false,
+                Some(n) => {
+                    let trimmed = n.trim();
+                    !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("public")
+                }
+            };
         }
 
         Ok(())

@@ -15,6 +15,10 @@ pub struct Stockpile {
     #[pyo3(get, set)]
     pub name: Option<String>,
 
+    /// Whether this stockpile is reserved (has a custom name other than "Public").
+    #[pyo3(get, set)]
+    pub is_reserved: bool,
+
     /// Detected stockpile type.
     #[pyo3(get, set)]
     pub stockpile_type: StockpileType,
@@ -82,6 +86,7 @@ impl Stockpile {
     pub fn new(resolution: String, stockpile_type: StockpileType) -> Self {
         Self {
             name: None,
+            is_reserved: false,
             stockpile_type,
             items: Vec::new(),
             timestamp: Utc::now().to_rfc3339(),
