@@ -19,7 +19,7 @@ use crate::enums::ItemFaction;
 use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
 use crate::image_utils;
-use crate::models::{ItemCandidate, Stockpile, StockpileItem};
+use crate::models::{ItemCandidate, Stockpile, StockpileItem, Timing};
 use crate::ocr::{digit_matcher, preprocess, OcrEngine, TextExtractor};
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, TemplateMatcher};
@@ -227,34 +227,40 @@ impl ScanPipeline {
         self.ensure_initialized(height)?;
 
         // Step 1: Detect quantity boxes and regions using hybrid black box + grey mask
+        let mut timing = Timing::default();
+
         let detect_start = Instant::now();
         let (regions, blackbox_ms, greymask_ms) =
             match self.detect_stockpile_regions(image, width, height) {
                 Ok(r) => r,
                 Err(FsOcrError::NoStockpileDetected) => {
                     stockpile.add_error("No stockpile detected in image".to_string());
+                    timing.detection_ms = Some(detect_start.elapsed().as_secs_f64() * 1000.0);
+                    stockpile.timing = Some(timing);
                     return Ok(stockpile);
                 }
                 Err(e) => return Err(e),
             };
-        stockpile.timing_detection_ms = Some(detect_start.elapsed().as_secs_f64() * 1000.0);
-        stockpile.timing_blackbox_ms = Some(blackbox_ms);
-        stockpile.timing_greymask_ms = Some(greymask_ms);
+        timing.detection_ms = Some(detect_start.elapsed().as_secs_f64() * 1000.0);
+        timing.blackbox_ms = Some(blackbox_ms);
+        timing.greymask_ms = Some(greymask_ms);
 
         // Step 2: Extract quantities via OCR
         let quantity_start = Instant::now();
         let quantities = self.extract_quantities(image, width, height, &regions)?;
-        stockpile.timing_quantity_ms = Some(quantity_start.elapsed().as_secs_f64() * 1000.0);
+        timing.quantity_ms = Some(quantity_start.elapsed().as_secs_f64() * 1000.0);
 
         // Step 3: Match icons to templates
         let match_start = Instant::now();
         let items = self.match_icons(image, width, height, &regions, &quantities, faction)?;
-        stockpile.timing_matching_ms = Some(match_start.elapsed().as_secs_f64() * 1000.0);
+        timing.matching_ms = Some(match_start.elapsed().as_secs_f64() * 1000.0);
 
         // Step 4: Extract stockpile metadata (type, name, shard)
         let metadata_start = Instant::now();
         self.extract_stockpile_metadata(image, width, height, &regions, &mut stockpile)?;
-        stockpile.timing_metadata_ms = Some(metadata_start.elapsed().as_secs_f64() * 1000.0);
+        timing.metadata_ms = Some(metadata_start.elapsed().as_secs_f64() * 1000.0);
+
+        stockpile.timing = Some(timing);
 
         // Build result
         for item in items {

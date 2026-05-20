@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::StockpileItem;
+use super::{StockpileItem, Timing};
 use crate::enums::StockpileType;
 
 /// Complete stockpile scan result.
@@ -15,13 +15,15 @@ pub struct Stockpile {
     #[pyo3(get, set)]
     pub name: Option<String>,
 
-    /// Whether this stockpile is reserved (has a custom name other than "Public").
-    #[pyo3(get, set)]
-    pub is_reserved: bool,
-
     /// Detected stockpile type.
-    #[pyo3(get, set)]
+    #[pyo3(get, set, name = "type")]
+    #[serde(rename = "type")]
     pub stockpile_type: StockpileType,
+
+    /// Whether this stockpile is reserved (has a custom name other than "Public").
+    #[pyo3(get, set, name = "is_reserve")]
+    #[serde(rename = "is_reserve")]
+    pub is_reserved: bool,
 
     /// List of detected items with quantities.
     #[pyo3(get)]
@@ -45,37 +47,13 @@ pub struct Stockpile {
 
     /// Processing errors or warnings.
     #[pyo3(get)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
 
-    /// Timing: detection stage (ms).
-    #[pyo3(get)]
+    /// Per-stage pipeline timing (None when not collected).
+    #[pyo3(get, set)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub timing_detection_ms: Option<f64>,
-
-    /// Timing: black box detection (ms) - part of detection.
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timing_blackbox_ms: Option<f64>,
-
-    /// Timing: grey mask detection (ms) - part of detection.
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timing_greymask_ms: Option<f64>,
-
-    /// Timing: quantity extraction (ms).
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timing_quantity_ms: Option<f64>,
-
-    /// Timing: icon matching (ms).
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timing_matching_ms: Option<f64>,
-
-    /// Timing: metadata extraction (ms).
-    #[pyo3(get)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timing_metadata_ms: Option<f64>,
+    pub timing: Option<Timing>,
 }
 
 #[pymethods]
@@ -89,17 +67,12 @@ impl Stockpile {
             is_reserved: false,
             stockpile_type,
             items: Vec::new(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
             shard: None,
             ingame_timestamp: None,
             resolution,
             errors: Vec::new(),
-            timing_detection_ms: None,
-            timing_blackbox_ms: None,
-            timing_greymask_ms: None,
-            timing_quantity_ms: None,
-            timing_matching_ms: None,
-            timing_metadata_ms: None,
+            timing: None,
         }
     }
 
@@ -163,7 +136,7 @@ impl Stockpile {
 
     /// Set the timestamp from a DateTime.
     pub fn set_timestamp(&mut self, dt: DateTime<Utc>) {
-        self.timestamp = dt.to_rfc3339();
+        self.timestamp = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
     }
 }
 

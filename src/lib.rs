@@ -37,7 +37,7 @@ use config::ScanConfig;
 use coordinator::ScanPipeline;
 use detector::{BlackBoxDetector, GreyMaskDetector};
 use enums::{ItemCategory, ItemFaction, StockpileType};
-use models::{ItemCandidate, Stockpile, StockpileItem};
+use models::{ItemCandidate, Stockpile, StockpileItem, Timing};
 
 /// Allowed extensions for database files.
 const ALLOWED_DB_EXTENSIONS: &[&str] = &["h5", "hdf5"];
@@ -507,6 +507,7 @@ fn fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stockpile>()?;
     m.add_class::<StockpileItem>()?;
     m.add_class::<ItemCandidate>()?;
+    m.add_class::<Timing>()?;
 
     // Debug/verification functions
     m.add_function(wrap_pyfunction!(compute_phash, m)?)?;

@@ -1,7 +1,13 @@
 //! Stockpile item model representing a single detected item.
 
 use pyo3::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+
+/// Serialize f64 rounded to 3 decimals (matches the fs reference output).
+fn serialize_confidence<S: Serializer>(value: &f64, ser: S) -> Result<S::Ok, S::Error> {
+    let rounded = (value * 1000.0).round() / 1000.0;
+    ser.serialize_f64(rounded)
+}
 
 /// An alternative candidate match for an item.
 #[pyclass]
@@ -13,6 +19,7 @@ pub struct ItemCandidate {
 
     /// Match confidence (0.0 - 1.0).
     #[pyo3(get)]
+    #[serde(serialize_with = "serialize_confidence")]
     pub confidence: f64,
 }
 
@@ -51,10 +58,12 @@ pub struct StockpileItem {
 
     /// Match confidence (0.0 - 1.0).
     #[pyo3(get)]
+    #[serde(serialize_with = "serialize_confidence")]
     pub confidence: f64,
 
     /// Alternative candidates within the confidence gap (if configured).
     #[pyo3(get)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub candidates: Option<Vec<ItemCandidate>>,
 }
 

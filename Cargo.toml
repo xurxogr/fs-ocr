@@ -8,7 +8,11 @@ authors = ["Foxhole Stockpiles Contributors"]
 
 [lib]
 name = "fs_ocr"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "fs-ocr"
+path = "src/bin/fs-ocr.rs"
 
 [features]
 default = []
@@ -17,7 +21,7 @@ default = []
 ocr-full = ["dep:leptess"]
 
 [dependencies]
-pyo3 = { version = "0.24", features = ["extension-module"] }
+pyo3 = "0.24"
 numpy = "0.24"
 ndarray = "0.16"
 serde = { version = "1.0", features = ["derive"] }
@@ -27,6 +31,7 @@ base64 = "0.22"
 rayon = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
 image = "0.25"
+clap = { version = "4", features = ["derive"] }
 
 # Native libraries
 hdf5 = "0.8"
