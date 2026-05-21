@@ -7,8 +7,15 @@
 /// Template height (normalized to 24px at 2160p scale).
 const TEMPLATE_HEIGHT: usize = 24;
 
-/// Minimum match score to accept a digit (0.0-1.0).
+/// Minimum match score to accept a digit at 2160p (0.0-1.0).
 const MIN_MATCH_SCORE: f64 = 0.6;
+
+/// Minimum match score at low resolutions (e.g., 1080p) — relaxed because
+/// downsampled glyphs lose detail and rarely hit the 0.6 threshold.
+const MIN_MATCH_SCORE_LOW: f64 = 0.45;
+
+/// Below this scale we use the relaxed threshold.
+const LOW_SCALE_CUTOFF: f64 = 0.75;
 
 /// Digit template with bit-packed data.
 struct DigitTemplate {
@@ -221,7 +228,12 @@ fn compute_match_score(
 
 /// Find connected components in a binary image.
 /// Returns list of (x, y, width, height) bounding boxes sorted by x.
-fn find_components(image: &[u8], width: usize, height: usize) -> Vec<(usize, usize, usize, usize)> {
+fn find_components(
+    image: &[u8],
+    width: usize,
+    height: usize,
+    scale: f64,
+) -> Vec<(usize, usize, usize, usize)> {
     let mut labels = vec![0u32; width * height];
     let mut next_label = 1u32;
     let mut equivalences: Vec<u32> = vec![0]; // Union-find
@@ -300,28 +312,221 @@ fn find_components(image: &[u8], width: usize, height: usize) -> Vec<(usize, usi
         }
     }
 
+    // Resolution-aware noise thresholds. At 2160p (scale=1.0) we keep the
+    // original 3×10 / 50px² floor; at 1080p (scale≈0.5) this shrinks to 1×5/12.
+    let s = scale.max(0.1);
+    let min_w = ((3.0 * s).round() as usize).max(1);
+    let min_h = ((10.0 * s).round() as usize).max(3);
+    let min_area = ((50.0 * s * s).round() as usize).max(8);
+
     // Convert to (x, y, w, h) and sort by x
-    let mut result: Vec<_> = boxes
+    let raw: Vec<_> = boxes
         .values()
         .filter(|(min_x, min_y, max_x, max_y)| {
             let w = max_x - min_x + 1;
             let h = max_y - min_y + 1;
-            // Filter noise: minimum size and area
-            w >= 3 && h >= 10 && (w * h) >= 50
+            w >= min_w && h >= min_h && (w * h) >= min_area
         })
         .map(|(min_x, min_y, max_x, max_y)| (*min_x, *min_y, max_x - min_x + 1, max_y - min_y + 1))
         .collect();
+
+    // Split components that look like several touching digits (e.g. "57" at
+    // 1080p where the top bars of 5 and 7 share a row of foreground pixels).
+    let mut result = Vec::with_capacity(raw.len());
+    for comp in raw {
+        split_merged_component(image, width, comp, scale, &mut result);
+    }
 
     result.sort_by_key(|&(x, _, _, _)| x);
     result
 }
 
+/// Recursively split a wide component along vertical valleys (columns with
+/// few foreground pixels). Digits are taller than wide, so a component with
+/// `w > h * SPLIT_ASPECT` is suspected to be two merged glyphs.
+fn split_merged_component(
+    image: &[u8],
+    width: usize,
+    component: (usize, usize, usize, usize),
+    scale: f64,
+    out: &mut Vec<(usize, usize, usize, usize)>,
+) {
+    const SPLIT_ASPECT: f64 = 0.9; // w/h above which a split is attempted
+    const MAX_DEPTH: u32 = 3;
+
+    let mut stack = vec![(component, 0u32)];
+    while let Some(((cx, cy, cw, ch), depth)) = stack.pop() {
+        if depth >= MAX_DEPTH || (cw as f64) <= (ch as f64) * SPLIT_ASPECT {
+            out.push((cx, cy, cw, ch));
+            continue;
+        }
+
+        // Per-column foreground counts within the component bbox.
+        let mut cols = vec![0u32; cw];
+        for x in 0..cw {
+            for y in 0..ch {
+                if image[(cy + y) * width + (cx + x)] >= 128 {
+                    cols[x] += 1;
+                }
+            }
+        }
+
+        // Search a band around the middle 60% of the width for the column
+        // with the fewest foreground pixels.
+        let lo = (cw as f64 * 0.2).round() as usize;
+        let hi = cw.saturating_sub((cw as f64 * 0.2).round() as usize);
+        let (lo, hi) = if lo + 1 < hi { (lo, hi) } else { (1, cw.saturating_sub(1).max(1)) };
+
+        let mut split_x = lo;
+        let mut split_v = u32::MAX;
+        for x in lo..hi {
+            if cols[x] < split_v {
+                split_v = cols[x];
+                split_x = x;
+            }
+        }
+
+        // At this resolution even the widest single glyph stays narrower than
+        // `ch * SPLIT_ASPECT`, so any component reaching here is a merged
+        // multi-digit blob (e.g. a "6" whose curve touches the preceding "5").
+        // We therefore always split at the lowest-density column; the min-size
+        // guard below rejects bad slivers, and recognition score-gates halves.
+        // Only bail if the "valley" is a completely solid column (no dip at
+        // all), which would indicate a single thick stroke rather than a gap.
+        if split_v >= ch as u32 {
+            out.push((cx, cy, cw, ch));
+            continue;
+        }
+
+        // Compute tight bounding boxes for each half.
+        let left = tight_bbox(image, width, cx, cy, 0, split_x, ch);
+        let right = tight_bbox(image, width, cx, cy, split_x, cw, ch);
+
+        let s = scale.max(0.1);
+        let min_w = ((3.0 * s).round() as usize).max(1);
+        let min_h = ((10.0 * s).round() as usize).max(3);
+
+        match (left, right) {
+            (Some(l), Some(r)) if l.2 >= min_w && l.3 >= min_h && r.2 >= min_w && r.3 >= min_h => {
+                stack.push((r, depth + 1));
+                stack.push((l, depth + 1));
+            }
+            _ => out.push((cx, cy, cw, ch)),
+        }
+    }
+}
+
+/// Tighten a slice of a parent component to its non-empty bounding box.
+/// `x0..x1` is in component-local coordinates; the returned bbox is global.
+fn tight_bbox(
+    image: &[u8],
+    width: usize,
+    cx: usize,
+    cy: usize,
+    x0: usize,
+    x1: usize,
+    ch: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    let mut min_x = usize::MAX;
+    let mut max_x = 0usize;
+    let mut min_y = usize::MAX;
+    let mut max_y = 0usize;
+    let mut any = false;
+    for y in 0..ch {
+        for x in x0..x1 {
+            if image[(cy + y) * width + (cx + x)] >= 128 {
+                any = true;
+                if cx + x < min_x { min_x = cx + x; }
+                if cx + x > max_x { max_x = cx + x; }
+                if cy + y < min_y { min_y = cy + y; }
+                if cy + y > max_y { max_y = cy + y; }
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some((min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+}
+
+/// Aggregate statistics over enclosed background — the cells that a flood fill
+/// from the image border cannot reach. Returns `(area_frac, cy_norm)` where
+/// `area_frac` is the enclosed area as a fraction of the glyph and `cy_norm` is
+/// the normalized vertical centroid (0 = top, 1 = bottom), or `None` if the
+/// glyph has no enclosed loop at all.
+fn enclosed_hole_stats(image: &[u8], width: usize, height: usize) -> Option<(f64, f64)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut reachable = vec![false; width * height];
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let push_bg = |x: usize, y: usize, reachable: &mut [bool], stack: &mut Vec<(usize, usize)>| {
+        let idx = y * width + x;
+        if image[idx] < 128 && !reachable[idx] {
+            reachable[idx] = true;
+            stack.push((x, y));
+        }
+    };
+    for x in 0..width {
+        push_bg(x, 0, &mut reachable, &mut stack);
+        push_bg(x, height - 1, &mut reachable, &mut stack);
+    }
+    for y in 0..height {
+        push_bg(0, y, &mut reachable, &mut stack);
+        push_bg(width - 1, y, &mut reachable, &mut stack);
+    }
+    while let Some((x, y)) = stack.pop() {
+        if x > 0 { push_bg(x - 1, y, &mut reachable, &mut stack); }
+        if x + 1 < width { push_bg(x + 1, y, &mut reachable, &mut stack); }
+        if y > 0 { push_bg(x, y - 1, &mut reachable, &mut stack); }
+        if y + 1 < height { push_bg(x, y + 1, &mut reachable, &mut stack); }
+    }
+    let mut hole_cells = 0usize;
+    let mut sum_y = 0usize;
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            if image[idx] < 128 && !reachable[idx] {
+                hole_cells += 1;
+                sum_y += y;
+            }
+        }
+    }
+    if hole_cells == 0 {
+        return None;
+    }
+    let area_frac = hole_cells as f64 / (width * height) as f64;
+    let cy_norm = (sum_y as f64 / hole_cells as f64) / (height - 1).max(1) as f64;
+    Some((area_frac, cy_norm))
+}
+
+/// Detect an enclosed background loop in the lower half of a glyph.
+fn has_lower_loop(image: &[u8], width: usize, height: usize) -> bool {
+    // Genuine 4: cy≈0.52, area_frac≈0.05. Genuine/misread 6: cy≈0.67, area_frac≈0.16.
+    matches!(enclosed_hole_stats(image, width, height), Some((af, cy)) if cy >= 0.60 && af >= 0.08)
+}
+
+/// Whether the glyph has any meaningful enclosed loop (used to reject digits
+/// that structurally require one, e.g. '9', when none is present).
+fn has_enclosed_loop(image: &[u8], width: usize, height: usize) -> bool {
+    matches!(enclosed_hole_stats(image, width, height), Some((af, _)) if af >= 0.04)
+}
+
 /// Recognize a single digit from an image region.
 fn recognize_digit(image: &[u8], width: usize, height: usize, scale: f64) -> Option<char> {
     let mut best_digit = None;
-    let mut best_score = MIN_MATCH_SCORE;
-
-    // Scale factor is used for width penalty calculation
+    // Relax the threshold at low resolutions: bilinear downsampling and the
+    // imperfect templates produce lower scores even on clean glyphs.
+    let min_score = if scale < LOW_SCALE_CUTOFF {
+        MIN_MATCH_SCORE_LOW
+    } else {
+        MIN_MATCH_SCORE
+    };
+    let mut best_score = min_score;
+    // Track the best non-'9' candidate so we can fall back if a loop-less glyph
+    // wins as '9' (see the 9-vs-2 disambiguation below).
+    let mut best_non9_digit = None;
+    let mut best_non9_score = min_score;
 
     for template in TEMPLATES {
         // Check aspect ratio compatibility
@@ -342,6 +547,23 @@ fn recognize_digit(image: &[u8], width: usize, height: usize, scale: f64) -> Opt
             best_score = score;
             best_digit = Some(template.digit);
         }
+        if template.digit != '9' && score > best_non9_score {
+            best_non9_score = score;
+            best_non9_digit = Some(template.digit);
+        }
+    }
+
+    // Disambiguate 4 vs 6: the F1 metric favors '4' for low-res '6' glyphs, but
+    // a '4' cannot have a large enclosed loop low in the glyph — only a '6' can.
+    if best_digit == Some('4') && has_lower_loop(image, width, height) {
+        return Some('6');
+    }
+
+    // Disambiguate 9 vs 2: an open-top '2' can out-score '2' as a '9' because
+    // its upper arc mimics a 9's bowl. A real '9' always has an enclosed loop;
+    // if there's none, drop '9' and take the best non-'9' candidate.
+    if best_digit == Some('9') && !has_enclosed_loop(image, width, height) {
+        return best_non9_digit;
     }
 
     best_digit
@@ -362,7 +584,7 @@ pub fn recognize_quantity(image: &[u8], width: usize, height: usize, scale: f64)
     let binary: Vec<u8> = image.iter().map(|&v| if v > 120 { 255 } else { 0 }).collect();
 
     // Find connected components (individual digits)
-    let components = find_components(&binary, width, height);
+    let components = find_components(&binary, width, height, scale);
 
     if components.is_empty() {
         return -1;
@@ -473,7 +695,7 @@ mod tests {
     #[test]
     fn test_find_components_empty() {
         let image = vec![0u8; 10 * 10];
-        let components = find_components(&image, 10, 10);
+        let components = find_components(&image, 10, 10, 1.0);
         assert!(components.is_empty());
     }
 
@@ -486,7 +708,79 @@ mod tests {
                 image[y * 20 + x] = 255;
             }
         }
-        let components = find_components(&image, 20, 20);
+        let components = find_components(&image, 20, 20, 1.0);
         assert_eq!(components.len(), 1);
+    }
+
+    fn art(rows: &[&str]) -> (Vec<u8>, usize, usize) {
+        let h = rows.len();
+        let w = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let mut buf = vec![0u8; w * h];
+        for (y, row) in rows.iter().enumerate() {
+            for (x, c) in row.chars().enumerate() {
+                if c == '#' {
+                    buf[y * w + x] = 255;
+                }
+            }
+        }
+        (buf, w, h)
+    }
+
+    const GENUINE_4: &[&str] = &[
+        "......#..", ".....##..", ".....##..", "....###..", "...##.#..",
+        "..##..#..", "..##..#..", ".########", "#########", "......#..", "......#..",
+    ];
+    const MISREAD_6: &[&str] = &[
+        "......###.", "......##..", ".....##...", "....##....", "...######.",
+        "...##...##", "..##.....#", "####.....#", "##.#....##", "...###.###", "....#####.",
+    ];
+    const GENUINE_6: &[&str] = &[
+        "....###.", "....##..", "...##...", "..##....", ".######.",
+        ".##...##", "##.....#", "##.....#", ".#....##", ".###.###", "..#####.",
+    ];
+
+    #[test]
+    fn lower_loop_distinguishes_4_from_6() {
+        let (b4, w4, h4) = art(GENUINE_4);
+        assert!(!has_lower_loop(&b4, w4, h4), "4 triangle is upper, not a loop");
+        let (b6, w6, h6) = art(MISREAD_6);
+        assert!(has_lower_loop(&b6, w6, h6), "6 loop sits in the lower half");
+        let (g6, gw6, gh6) = art(GENUINE_6);
+        assert!(has_lower_loop(&g6, gw6, gh6), "genuine 6 loop detected");
+    }
+
+    #[test]
+    fn recognize_digit_resolves_6_misread_as_4() {
+        let (b4, w4, h4) = art(GENUINE_4);
+        assert_eq!(recognize_digit(&b4, w4, h4, 0.5), Some('4'));
+        let (b6, w6, h6) = art(MISREAD_6);
+        assert_eq!(recognize_digit(&b6, w6, h6, 0.5), Some('6'));
+    }
+
+    // Open-top '2' (no enclosed loop) vs a genuine '9' (closed upper bowl).
+    const OPEN_2: &[&str] = &[
+        "....###..", "...######", "..###..##", "..##...##", "..##...##",
+        ".......##", "......##.", ".....###.", "....###..", "...###...",
+        "..#######", "#########",
+    ];
+    const GENUINE_9: &[&str] = &[
+        "...##...", ".######.", ".##..###", "##....##", "##....##",
+        "##....##", ".##..###", ".######.", "....###.", "...###..",
+        "...##...", "..##....",
+    ];
+
+    #[test]
+    fn enclosed_loop_distinguishes_9_from_open_2() {
+        let (b2, w2, h2) = art(OPEN_2);
+        assert!(!has_enclosed_loop(&b2, w2, h2), "open-top 2 has no enclosed loop");
+        let (b9, w9, h9) = art(GENUINE_9);
+        assert!(has_enclosed_loop(&b9, w9, h9), "genuine 9 has a closed bowl");
+    }
+
+    #[test]
+    fn recognize_digit_rejects_9_without_loop() {
+        // The open '2' must never be reported as '9'.
+        let (b2, w2, h2) = art(OPEN_2);
+        assert_ne!(recognize_digit(&b2, w2, h2, 0.5), Some('9'));
     }
 }
