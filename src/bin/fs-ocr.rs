@@ -61,7 +61,7 @@ struct ScanArgs {
     max_ncc_candidates: usize,
 
     /// Tiebreaker threshold
-    #[arg(long, value_name = "F64", default_value_t = 0.0015)]
+    #[arg(long, value_name = "F64", default_value_t = 0.003)]
     ncc_tiebreaker: f64,
 
     /// Initial NCC batch size before escalation

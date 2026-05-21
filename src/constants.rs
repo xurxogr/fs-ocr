@@ -89,9 +89,14 @@ pub const NCC_INITIAL_CANDIDATES: usize = 25;
 pub const NCC_ESCALATION_THRESHOLD: f64 = 0.90;
 
 /// NCC tiebreaker threshold.
-/// When top matches are within this threshold, use edge-based comparison.
-/// Set to 0.0 to disable tiebreaker. Matches the reference (fs) config.
-pub const NCC_TIEBREAKER_THRESHOLD: f64 = 0.002;
+/// When top matches are within this threshold, use edge-based (Sobel) comparison
+/// to pick the winner. Set to 0.0 to disable.
+///
+/// Slightly wider than the reference (fs) 0.002: some genuine near-ties have an
+/// NCC gap just over 0.002 (e.g. the CDW-A ExplosiveLightC vs RifleAutomaticC
+/// pair sits at ~0.0029), where the raw-NCC winner is wrong but the edge-diff
+/// comparison is correct. 0.003 lets the tiebreaker fire on those.
+pub const NCC_TIEBREAKER_THRESHOLD: f64 = 0.003;
 
 // =============================================================================
 // Morphological Kernel Sizes
