@@ -546,6 +546,8 @@ impl ScanPipeline {
             self.config.max_ncc_candidates,
             self.config.confidence_gap,
             self.config.ncc_tiebreaker_threshold,
+            self.config.ncc_initial_candidates,
+            self.config.ncc_escalation_threshold,
         );
 
         // Step 2: Two-phase matching for better parallelization

@@ -3,7 +3,10 @@
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{MAX_NCC_CANDIDATES, NCC_TIEBREAKER_THRESHOLD, PHASH_THRESHOLD};
+use crate::constants::{
+    MAX_NCC_CANDIDATES, NCC_ESCALATION_THRESHOLD, NCC_INITIAL_CANDIDATES, NCC_TIEBREAKER_THRESHOLD,
+    PHASH_THRESHOLD,
+};
 
 /// Configuration for the stockpile scanner.
 #[pyclass]
@@ -15,10 +18,23 @@ pub struct ScanConfig {
     #[pyo3(get, set)]
     pub phash_threshold: u32,
 
-    /// Maximum candidates to evaluate with NCC after pHash filtering.
-    /// Default: 50
+    /// Hard cap on candidates evaluated with NCC after pHash filtering.
+    /// Upper bound of adaptive escalation. Default: 100
     #[pyo3(get, set)]
     pub max_ncc_candidates: usize,
+
+    /// Initial NCC batch size for adaptive escalation.
+    /// Matching starts by scoring this many top-pHash candidates and only
+    /// expands when confidence stays low. Default: 25
+    #[pyo3(get, set)]
+    pub ncc_initial_candidates: usize,
+
+    /// Confidence floor for adaptive escalation.
+    /// If the best confidence after a batch is below this, the candidate count
+    /// is doubled (up to `max_ncc_candidates`) and matching retries.
+    /// Default: 0.85
+    #[pyo3(get, set)]
+    pub ncc_escalation_threshold: f64,
 
     /// Confidence gap for returning alternative candidates.
     /// When > 0, returns all matches within this gap of the best match.
@@ -42,19 +58,25 @@ impl ScanConfig {
         phash_threshold=None,
         max_ncc_candidates=None,
         confidence_gap=0.0,
-        ncc_tiebreaker_threshold=None
+        ncc_tiebreaker_threshold=None,
+        ncc_initial_candidates=None,
+        ncc_escalation_threshold=None
     ))]
     pub fn new(
         phash_threshold: Option<u32>,
         max_ncc_candidates: Option<usize>,
         confidence_gap: f64,
         ncc_tiebreaker_threshold: Option<f64>,
+        ncc_initial_candidates: Option<usize>,
+        ncc_escalation_threshold: Option<f64>,
     ) -> Self {
         Self {
             phash_threshold: phash_threshold.unwrap_or(PHASH_THRESHOLD),
             max_ncc_candidates: max_ncc_candidates.unwrap_or(MAX_NCC_CANDIDATES),
             confidence_gap,
             ncc_tiebreaker_threshold: ncc_tiebreaker_threshold.unwrap_or(NCC_TIEBREAKER_THRESHOLD),
+            ncc_initial_candidates: ncc_initial_candidates.unwrap_or(NCC_INITIAL_CANDIDATES),
+            ncc_escalation_threshold: ncc_escalation_threshold.unwrap_or(NCC_ESCALATION_THRESHOLD),
         }
     }
 
@@ -91,6 +113,8 @@ impl Default for ScanConfig {
             max_ncc_candidates: MAX_NCC_CANDIDATES,
             confidence_gap: 0.0,
             ncc_tiebreaker_threshold: NCC_TIEBREAKER_THRESHOLD,
+            ncc_initial_candidates: NCC_INITIAL_CANDIDATES,
+            ncc_escalation_threshold: NCC_ESCALATION_THRESHOLD,
         }
     }
 }

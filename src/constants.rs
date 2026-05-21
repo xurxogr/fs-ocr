@@ -64,15 +64,34 @@ pub const SAMPLE_RATE_BASE: i32 = 10;
 /// Note: 12 was too aggressive - some icons need threshold 15 to match correctly.
 pub const PHASH_THRESHOLD: u32 = 15;
 
-/// Maximum candidates to evaluate with NCC after pHash filtering.
-/// Note: 25 was too few - some icons need more candidates to find correct match.
-/// Reduced from 50 to 30 for better performance with acceptable accuracy.
-pub const MAX_NCC_CANDIDATES: usize = 30;
+/// Hard cap on candidates evaluated with NCC after pHash filtering.
+/// This is the upper bound of adaptive escalation: matching starts with
+/// `NCC_INITIAL_CANDIDATES` and only expands toward this cap when the best
+/// confidence stays below `NCC_ESCALATION_THRESHOLD`. The common case stops
+/// at the initial batch, so raising the cap costs nothing on easy icons while
+/// letting hard ones (e.g. modded RifleW/StickyBomb) reach the right template.
+pub const MAX_NCC_CANDIDATES: usize = 100;
+
+/// Initial NCC batch size for adaptive escalation.
+/// The first matching attempt only scores this many top-pHash candidates.
+pub const NCC_INITIAL_CANDIDATES: usize = 25;
+
+/// Confidence floor for adaptive escalation.
+/// If the best NCC confidence after a batch is below this value, the candidate
+/// count is doubled (up to `MAX_NCC_CANDIDATES`) and matching retries. Reusing
+/// already-computed scores keeps escalation cheap.
+///
+/// Calibrated from the reference (fs) dataset (36,730 matches): 93.9% of correct
+/// matches score >= 0.95, with a thin ambiguous tail below 0.90. 0.90 sits in the
+/// valley between them, so easy icons never escalate while borderline matches
+/// (where a wrong template can win within the first batch) always get a second
+/// look. Raising it only costs extra NCC work; it never hurts correctness.
+pub const NCC_ESCALATION_THRESHOLD: f64 = 0.90;
 
 /// NCC tiebreaker threshold.
 /// When top matches are within this threshold, use edge-based comparison.
-/// Set to 0.0 to disable tiebreaker.
-pub const NCC_TIEBREAKER_THRESHOLD: f64 = 0.0015;
+/// Set to 0.0 to disable tiebreaker. Matches the reference (fs) config.
+pub const NCC_TIEBREAKER_THRESHOLD: f64 = 0.002;
 
 // =============================================================================
 // Morphological Kernel Sizes

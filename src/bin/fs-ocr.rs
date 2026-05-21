@@ -56,13 +56,21 @@ struct ScanArgs {
     #[arg(long, value_name = "U32", default_value_t = 15)]
     phash_threshold: u32,
 
-    /// NCC candidate limit
-    #[arg(long, value_name = "USIZE", default_value_t = 50)]
+    /// NCC candidate cap (upper bound of adaptive escalation)
+    #[arg(long, value_name = "USIZE", default_value_t = 100)]
     max_ncc_candidates: usize,
 
     /// Tiebreaker threshold
     #[arg(long, value_name = "F64", default_value_t = 0.0015)]
     ncc_tiebreaker: f64,
+
+    /// Initial NCC batch size before escalation
+    #[arg(long, value_name = "USIZE", default_value_t = 25)]
+    ncc_initial_candidates: usize,
+
+    /// Confidence floor below which the candidate count is escalated
+    #[arg(long, value_name = "F64", default_value_t = 0.85)]
+    ncc_escalation_threshold: f64,
 }
 
 fn main() -> ExitCode {
@@ -96,6 +104,8 @@ fn run_scan(args: ScanArgs) -> ExitCode {
         max_ncc_candidates: args.max_ncc_candidates,
         confidence_gap: args.confidence_gap,
         ncc_tiebreaker_threshold: args.ncc_tiebreaker,
+        ncc_initial_candidates: args.ncc_initial_candidates,
+        ncc_escalation_threshold: args.ncc_escalation_threshold,
     };
 
     let data_path = PathBuf::from("data");

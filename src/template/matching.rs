@@ -120,24 +120,31 @@ pub struct TemplateMatcher {
     database: Arc<TemplateDatabase>,
     /// pHash threshold for filtering candidates.
     phash_threshold: u32,
-    /// Maximum NCC candidates to evaluate.
+    /// Hard cap on NCC candidates to evaluate (upper bound of escalation).
     max_ncc_candidates: usize,
     /// Confidence gap for returning alternatives.
     confidence_gap: f64,
     /// NCC tiebreaker threshold.
     ncc_tiebreaker_threshold: f64,
+    /// Initial NCC batch size before escalation.
+    ncc_initial_candidates: usize,
+    /// Confidence floor below which the candidate count is escalated.
+    ncc_escalation_threshold: f64,
     /// Number of top matches to keep.
     top_n: usize,
 }
 
 impl TemplateMatcher {
     /// Create a new template matcher with config parameters.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         database: Arc<TemplateDatabase>,
         phash_threshold: u32,
         max_ncc_candidates: usize,
         confidence_gap: f64,
         ncc_tiebreaker_threshold: f64,
+        ncc_initial_candidates: usize,
+        ncc_escalation_threshold: f64,
     ) -> Self {
         Self {
             database,
@@ -145,6 +152,8 @@ impl TemplateMatcher {
             max_ncc_candidates,
             confidence_gap,
             ncc_tiebreaker_threshold,
+            ncc_initial_candidates,
+            ncc_escalation_threshold,
             top_n: 5,
         }
     }
@@ -194,34 +203,55 @@ impl TemplateMatcher {
             .map(|(local_idx, _)| candidate_indices[*local_idx])
             .collect();
 
-        // Phase 2: NCC matching with precomputed stats (parallelized)
-        let mut all_matches: Vec<(usize, f64)> = ncc_candidates
-            .par_iter()
-            .map(|&idx| {
-                let template = &self.database.templates[idx];
-                let template_mean = self.database.ncc_means[idx];
-                let template_inv_std = self.database.ncc_inv_stds[idx];
+        // Phase 2: NCC matching with adaptive candidate escalation.
+        // Score an initial batch of the top-pHash candidates; only expand
+        // (doubling, up to the pool size) when the best confidence stays below
+        // the escalation threshold. Candidates are pHash-sorted, so each batch
+        // adds the next-most-promising ones and earlier scores are reused.
+        let pool_len = ncc_candidates.len();
+        let mut all_matches: Vec<(usize, f64)> = Vec::with_capacity(pool_len);
+        let mut scored = 0usize;
+        let mut target = self.ncc_initial_candidates.clamp(1, pool_len);
 
-                let confidence = if icon_image.len() == template.image_data.len() {
-                    ncc_with_precomputed(
-                        icon_image,
-                        &template.image_data,
-                        template_mean,
-                        template_inv_std,
-                    ) as f64
-                } else {
-                    compute_ncc(
-                        icon_image,
-                        icon_width as usize,
-                        icon_height as usize,
-                        &template.image_data,
-                        template.width as usize,
-                        template.height as usize,
-                    )
-                };
-                (idx, confidence)
-            })
-            .collect();
+        loop {
+            let mut batch: Vec<(usize, f64)> = ncc_candidates[scored..target]
+                .par_iter()
+                .map(|&idx| {
+                    let template = &self.database.templates[idx];
+                    let template_mean = self.database.ncc_means[idx];
+                    let template_inv_std = self.database.ncc_inv_stds[idx];
+
+                    let confidence = if icon_image.len() == template.image_data.len() {
+                        ncc_with_precomputed(
+                            icon_image,
+                            &template.image_data,
+                            template_mean,
+                            template_inv_std,
+                        ) as f64
+                    } else {
+                        compute_ncc(
+                            icon_image,
+                            icon_width as usize,
+                            icon_height as usize,
+                            &template.image_data,
+                            template.width as usize,
+                            template.height as usize,
+                        )
+                    };
+                    (idx, confidence)
+                })
+                .collect();
+            all_matches.append(&mut batch);
+            scored = target;
+
+            let best_so_far = all_matches.iter().map(|&(_, c)| c).fold(f64::MIN, f64::max);
+
+            // Stop once confident enough or the candidate pool is exhausted.
+            if best_so_far >= self.ncc_escalation_threshold || scored >= pool_len {
+                break;
+            }
+            target = (target * 2).min(pool_len);
+        }
 
         // Sort by confidence (descending)
         all_matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -293,7 +323,7 @@ impl TemplateMatcher {
         Ok(MatchResult {
             best_match: Some(best_template),
             confidence: best_confidence,
-            tested_candidates: ncc_candidates.len(),
+            tested_candidates: all_matches.len(),
             top_matches,
             gap_candidates,
         })

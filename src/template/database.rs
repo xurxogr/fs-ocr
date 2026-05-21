@@ -493,7 +493,12 @@ impl TemplateDatabase {
             candidates.retain(|&i| !excluded.contains(&self.templates[i].code));
         }
 
-        candidates.into_iter().collect()
+        // Sort by index so candidate order is deterministic across calls.
+        // HashSet iteration order varies per call (random seed), which would
+        // otherwise make tiebreaks between equal-scoring templates nondeterministic.
+        let mut candidates: Vec<usize> = candidates.into_iter().collect();
+        candidates.sort_unstable();
+        candidates
     }
 
     /// Get the number of templates.
