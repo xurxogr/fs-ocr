@@ -218,11 +218,7 @@ mod tests {
         // 0 1 2
         // 3 4 5
         // 6 7 8
-        let image = vec![
-            0, 0, 0,
-            0, 255, 0,
-            0, 0, 0,
-        ];
+        let image = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
         let dilated = dilate_2x2(&image, 3, 3);
         // 2x2 kernel dilates by looking at (y+dy, x+dx) where dy,dx in {0,1}
         // So the 255 at (1,1) affects positions where kernel window includes (1,1):

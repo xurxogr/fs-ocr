@@ -154,21 +154,13 @@ impl OcrEngine for OcrsEngine {
 
         // Use direct recognition with known bounding rect (skip detection)
         // The entire image is the text region
-        let rect = RotatedRect::from_rect(RectF::from_tlhw(
-            0.0,
-            0.0,
-            height as f32,
-            width as f32,
-        ));
+        let rect = RotatedRect::from_rect(RectF::from_tlhw(0.0, 0.0, height as f32, width as f32));
 
         // Perform text recognition
         let text_lines = match engine.recognize_text(&input, &[[rect].to_vec()]) {
             Ok(lines) => lines,
             Err(e) => {
-                return Err(FsOcrError::Ocr(format!(
-                    "OCR recognition failed: {:?}",
-                    e
-                )));
+                return Err(FsOcrError::Ocr(format!("OCR recognition failed: {:?}", e)));
             }
         };
 
@@ -205,7 +197,6 @@ impl OcrEngine for OcrsEngine {
         "ocrs"
     }
 }
-
 
 #[cfg(test)]
 mod tests {

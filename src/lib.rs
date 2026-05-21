@@ -333,7 +333,8 @@ impl StockpileScanner {
         let image_data = image.as_slice()?;
 
         // Convert RGB to grayscale
-        let grayscale = crate::image_utils::rgb_to_grayscale(image_data, width as usize, height as usize);
+        let grayscale =
+            crate::image_utils::rgb_to_grayscale(image_data, width as usize, height as usize);
 
         // Get quantity boxes
         let bb_detector = BlackBoxDetector::new(width, height);
@@ -517,8 +518,8 @@ fn fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__author__", "Foxhole Stockpiles Contributors")?;
 
     // OCR backend feature flags
-    m.add("HAS_OCR_BASIC", true)?;  // ocrs - always available
-    m.add("HAS_OCR_FULL", cfg!(feature = "ocr-full"))?;  // Tesseract - optional
+    m.add("HAS_OCR_BASIC", true)?; // ocrs - always available
+    m.add("HAS_OCR_FULL", cfg!(feature = "ocr-full"))?; // Tesseract - optional
 
     // Primary OCR backend info
     #[cfg(feature = "ocr-full")]

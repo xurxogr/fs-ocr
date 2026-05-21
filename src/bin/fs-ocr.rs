@@ -99,8 +99,7 @@ fn run_scan(args: ScanArgs) -> ExitCode {
     };
 
     let data_path = PathBuf::from("data");
-    let mut pipeline =
-        ScanPipeline::new(args.database.as_path(), data_path.as_path(), config);
+    let mut pipeline = ScanPipeline::new(args.database.as_path(), data_path.as_path(), config);
 
     let faction = args
         .faction

@@ -663,7 +663,8 @@ impl ScanPipeline {
                         )
                     }
                     _ => {
-                        let crated = item_idx >= regions.groups.first().map(|g| g.size).unwrap_or(0);
+                        let crated =
+                            item_idx >= regions.groups.first().map(|g| g.size).unwrap_or(0);
                         StockpileItem::unknown(quantity, crated)
                     }
                 };
@@ -867,7 +868,12 @@ fn split_text_lines(image: &[u8], width: usize, height: usize) -> Vec<(Vec<u8>, 
     }
 
     // Extract and tight-crop each line
-    fn extract_tight_line(image: &[u8], width: usize, y_start: usize, y_end: usize) -> (Vec<u8>, usize, usize) {
+    fn extract_tight_line(
+        image: &[u8],
+        width: usize,
+        y_start: usize,
+        y_end: usize,
+    ) -> (Vec<u8>, usize, usize) {
         // Find actual text bounds within this line region
         let mut line_min_y = y_end;
         let mut line_max_y = y_start;
@@ -950,7 +956,9 @@ fn preprocess_light_text(
     let mut grayscale = Vec::with_capacity(width * height);
     let mut raw_gray = Vec::with_capacity(width * height);
     for chunk in image.chunks_exact(3) {
-        let luma = ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128) >> 8) as u8;
+        let luma =
+            ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128)
+                >> 8) as u8;
         raw_gray.push(luma);
         grayscale.push(luma.max(144));
     }
@@ -1008,16 +1016,14 @@ fn preprocess_light_text(
 
 /// Preprocess for shard/timestamp text.
 /// Converts to grayscale with minimum brightness boost for better OCR.
-fn preprocess_for_shard(
-    image: &[u8],
-    width: usize,
-    height: usize,
-) -> (Vec<u8>, usize, usize) {
+fn preprocess_for_shard(image: &[u8], width: usize, height: usize) -> (Vec<u8>, usize, usize) {
     let mut processed = Vec::with_capacity(width * height);
 
     for chunk in image.chunks_exact(3) {
         // Standard luma conversion: 0.299*R + 0.587*G + 0.114*B
-        let luma = ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128) >> 8) as u8;
+        let luma =
+            ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128)
+                >> 8) as u8;
         // Boost minimum brightness to help OCR recognize bright text on dark backgrounds
         processed.push(luma.max(144));
     }

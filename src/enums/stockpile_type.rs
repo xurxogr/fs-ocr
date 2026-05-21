@@ -160,37 +160,88 @@ impl StockpileType {
 
     // Type name constants for reuse
     const ENCAMPMENT: &'static [&'static str] = &[
-        "Encampment", "Feldlager", "Campement", "Acampamento", "Лагерь", "营地",
+        "Encampment",
+        "Feldlager",
+        "Campement",
+        "Acampamento",
+        "Лагерь",
+        "营地",
     ];
     const KEEP: &'static [&'static str] = &[
-        "Keep", "Wehrturm", "Place Forte", "Torreão", "Крепость", "要塞",
+        "Keep",
+        "Wehrturm",
+        "Place Forte",
+        "Torreão",
+        "Крепость",
+        "要塞",
     ];
     const SAFE_HOUSE: &'static [&'static str] = &[
-        "Safe House", "Unterschlupf", "Planque", "Casa Fortificada", "Убежище", "安全屋",
+        "Safe House",
+        "Unterschlupf",
+        "Planque",
+        "Casa Fortificada",
+        "Убежище",
+        "安全屋",
     ];
     const RELIC_BASE: &'static [&'static str] = &[
-        "Relic Base", "Reliktbasis", "Base Relique", "Base Relíquia", "Реликтовая База", "遗迹基地",
+        "Relic Base",
+        "Reliktbasis",
+        "Base Relique",
+        "Base Relíquia",
+        "Реликтовая База",
+        "遗迹基地",
     ];
     const BUNKER_BASE: &'static [&'static str] = &[
-        "Bunker Base", "Bunkerbasis", "Base Bunker", "Centro do Bunker", "Base de Bunker",
-        "Centro do bunker", "Бункерная база", "Бункерная База", "地堡基地",
+        "Bunker Base",
+        "Bunkerbasis",
+        "Base Bunker",
+        "Centro do Bunker",
+        "Base de Bunker",
+        "Centro do bunker",
+        "Бункерная база",
+        "Бункерная База",
+        "地堡基地",
     ];
     const BORDER_BASE: &'static [&'static str] = &[
-        "Border Base", "Grenzbasis", "Base Frontalière", "Base Fronteiriça", "Пограничная База", "边境基地",
+        "Border Base",
+        "Grenzbasis",
+        "Base Frontalière",
+        "Base Fronteiriça",
+        "Пограничная База",
+        "边境基地",
     ];
     const TOWN_BASE: &'static [&'static str] = &[
-        "Town Base", "Stadtkernbasis", "Quartier Général", "Base da Cidade", "Ратуша", "城镇基地",
+        "Town Base",
+        "Stadtkernbasis",
+        "Quartier Général",
+        "Base da Cidade",
+        "Ратуша",
+        "城镇基地",
     ];
     const UNDERGROUND_FORTRESS: &'static [&'static str] = &[
-        "Underground Fortress", "Untergrundfestung", "Forteresse Souterraine", "Bunker Subterrâneo",
-        "Подземная Крепость", "地下要塞",
+        "Underground Fortress",
+        "Untergrundfestung",
+        "Forteresse Souterraine",
+        "Bunker Subterrâneo",
+        "Подземная Крепость",
+        "地下要塞",
     ];
     const BMS_LONGHOOK: &'static [&'static str] = &["BMS - Longhook"];
     const STORAGE_DEPOT: &'static [&'static str] = &[
-        "Storage Depot", "Lagerdepot", "Dépôt", "Depósito", "Складское помещение", "仓库",
+        "Storage Depot",
+        "Lagerdepot",
+        "Dépôt",
+        "Depósito",
+        "Складское помещение",
+        "仓库",
     ];
     const SEAPORT: &'static [&'static str] = &[
-        "Seaport", "Seehafen", "Port", "Porto", "Морской порт", "海港",
+        "Seaport",
+        "Seehafen",
+        "Port",
+        "Porto",
+        "Морской порт",
+        "海港",
     ];
     const AIRCRAFT_DEPOT: &'static [&'static str] = &["Aircraft Depot"];
 

@@ -1,0 +1,20 @@
+# Formatting-only pre-commit hooks. Any committed code is auto-formatted; if a
+# hook reformats a file the commit aborts so you can re-stage the result.
+# One-time setup per clone:  pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt (Rust)
+        # cargo fmt formats the whole crate (it ignores per-file paths), which
+        # is why the repo is kept fully formatted — no unrelated-file churn.
+        entry: cargo fmt
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: ruff-format
+        name: ruff format (Python)
+        entry: ruff format
+        language: system
+        types_or: [python, pyi]

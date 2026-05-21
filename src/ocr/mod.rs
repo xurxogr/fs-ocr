@@ -61,7 +61,7 @@ pub fn create_block_engine(data_path: &str, _model: &str) -> Option<Box<dyn OcrE
 /// Ocrs-based TextExtractor wrapper (used when ocr-full is not enabled).
 #[cfg(not(feature = "ocr-full"))]
 mod ocrs_extractor {
-    use super::{OcrConfig, OcrEngine, OcrsEngine, quantity};
+    use super::{quantity, OcrConfig, OcrEngine, OcrsEngine};
 
     pub struct TextExtractor {
         engine: Option<OcrsEngine>,
@@ -71,7 +71,10 @@ mod ocrs_extractor {
 
     impl TextExtractor {
         /// Create a new text extractor for quantities.
-        pub fn new<P: AsRef<std::path::Path>>(data_path: P, model_name: &str) -> crate::error::Result<Self> {
+        pub fn new<P: AsRef<std::path::Path>>(
+            data_path: P,
+            model_name: &str,
+        ) -> crate::error::Result<Self> {
             let path = data_path.as_ref().to_string_lossy().to_string();
             let config = OcrConfig {
                 data_path: path.clone(),
@@ -88,7 +91,10 @@ mod ocrs_extractor {
         }
 
         /// Create for text (no whitelist).
-        pub fn new_for_text<P: AsRef<std::path::Path>>(data_path: P, model_name: &str) -> crate::error::Result<Self> {
+        pub fn new_for_text<P: AsRef<std::path::Path>>(
+            data_path: P,
+            model_name: &str,
+        ) -> crate::error::Result<Self> {
             let path = data_path.as_ref().to_string_lossy().to_string();
             let config = OcrConfig::for_text_line(&path, model_name);
             let engine = OcrsEngine::new(config).ok();
@@ -144,7 +150,10 @@ mod ocrs_extractor {
 
         /// Check if OCR is available.
         pub fn is_available(&self) -> bool {
-            self.engine.as_ref().map(|e| e.is_available()).unwrap_or(false)
+            self.engine
+                .as_ref()
+                .map(|e| e.is_available())
+                .unwrap_or(false)
         }
 
         /// Get the data path.
