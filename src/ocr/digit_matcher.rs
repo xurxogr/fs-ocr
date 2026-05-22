@@ -158,7 +158,7 @@ fn get_template_pixel(template: &DigitTemplate, x: usize, y: usize) -> bool {
     if x >= template.width || y >= TEMPLATE_HEIGHT {
         return false;
     }
-    let bytes_per_row = (template.width + 7) / 8;
+    let bytes_per_row = template.width.div_ceil(8);
     let byte_idx = y * bytes_per_row + x / 8;
     let bit_idx = 7 - (x % 8);
     (template.data[byte_idx] >> bit_idx) & 1 == 1
@@ -382,9 +382,9 @@ fn split_merged_component(
 
         let mut split_x = lo;
         let mut split_v = u32::MAX;
-        for x in lo..hi {
-            if cols[x] < split_v {
-                split_v = cols[x];
+        for (x, &col) in cols.iter().enumerate().take(hi).skip(lo) {
+            if col < split_v {
+                split_v = col;
                 split_x = x;
             }
         }
@@ -553,9 +553,9 @@ fn recognize_digit(image: &[u8], width: usize, height: usize, scale: f64) -> Opt
 
         // Width ratio: penalize if image width is very different from expected template width
         let width_ratio = width as f64 / scaled_template_width.max(1) as f64;
-        let width_penalty = if width_ratio < 0.5 || width_ratio > 2.0 {
+        let width_penalty = if !(0.5..=2.0).contains(&width_ratio) {
             0.5 // Heavy penalty for very different widths
-        } else if width_ratio < 0.7 || width_ratio > 1.4 {
+        } else if !(0.7..=1.4).contains(&width_ratio) {
             0.85 // Moderate penalty
         } else {
             1.0 // No penalty

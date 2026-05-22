@@ -139,6 +139,7 @@ impl ScanPipeline {
     }
 
     /// Extract text from a region using English OCR (for debug).
+    #[allow(clippy::too_many_arguments)]
     pub fn extract_text_from_region_public(
         &self,
         image: &[u8],
@@ -931,9 +932,7 @@ fn join_multiline_name(text: &str) -> String {
         if trimmed.is_empty() {
             continue;
         }
-        if result.is_empty() {
-            result.push_str(trimmed);
-        } else if result.ends_with('-') {
+        if result.is_empty() || result.ends_with('-') {
             result.push_str(trimmed);
         } else {
             result.push(' ');

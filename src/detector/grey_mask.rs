@@ -260,12 +260,8 @@ impl GreyMaskDetector {
         }
 
         // Build result - coordinates are relative to ROI
-        let mut regions = DetectedRegions::new(
-            self.scale_factor,
-            roi_h as i32,
-            self.box_width,
-            self.box_height,
-        );
+        let mut regions =
+            DetectedRegions::new(self.scale_factor, roi_h, self.box_width, self.box_height);
         regions.quantity_boxes = quantity_boxes;
         regions.groups = groups;
         regions.icon_regions = self.compute_icon_regions(&regions.quantity_boxes);
@@ -276,6 +272,7 @@ impl GreyMaskDetector {
     /// Find the most common grey value in the ROI.
     ///
     /// Create a mask using a threshold - pixels with any RGB > threshold are white.
+    #[allow(clippy::too_many_arguments)]
     fn create_threshold_mask_roi(
         &self,
         image: &[u8],

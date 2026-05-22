@@ -124,8 +124,7 @@ impl StockpileScanner {
         let data_dir = data_path.unwrap_or("data");
 
         // Validate database path extension (security: prevent loading arbitrary files)
-        validate_database_path(database_path)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        validate_database_path(database_path).map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         // Check file exists
         if !Path::new(database_path).exists() {
@@ -407,7 +406,7 @@ impl StockpileScanner {
         config: Option<ScanConfig>,
     ) -> PyResult<Stockpile> {
         // Validate image path extension (security: prevent loading arbitrary files)
-        validate_image_path(image_path).map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
+        validate_image_path(image_path).map_err(pyo3::exceptions::PyValueError::new_err)?;
 
         // Update config if provided
         if let Some(cfg) = config {
