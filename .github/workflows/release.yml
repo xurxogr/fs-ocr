@@ -53,7 +53,10 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --features static-hdf5
+          # pyo3/extension-module is required so the wheel does NOT link libpython
+          # (abi3). Passing --features on the CLI overrides pyproject's
+          # [tool.maturin] features, so it must be repeated here explicitly.
+          args: --release --out dist --features static-hdf5,pyo3/extension-module
           sccache: "true"
           # manylinux_2_28 (AlmaLinux 8) ships a modern toolchain that can build
           # HDF5 from source. before-script-linux runs INSIDE that container.
@@ -149,16 +152,18 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: >-
             --release --out dist
-            --features static-hdf5,ocr-full
+            --features static-hdf5,ocr-full,pyo3/extension-module
             ${{ matrix.platform.os == 'linux' && '--auditwheel skip' || '' }}
           sccache: "true"
           manylinux: "2_28"
           # Linux: build deps + Tesseract/Leptonica dev libs inside the container.
           # PowerTools/CRB + EPEL provide the -devel packages on AlmaLinux 8.
+          # clang/llvm-devel: tesseract-sys & leptonica-sys run bindgen, which
+          # needs libclang.so at build time (not present in manylinux by default).
           before-script-linux: |
             dnf install -y dnf-plugins-core epel-release
             dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled crb || true
-            dnf install -y cmake gcc gcc-c++ make tesseract-devel leptonica-devel
+            dnf install -y cmake gcc gcc-c++ make tesseract-devel leptonica-devel clang clang-devel llvm-devel
 
       # Linux only: we skipped maturin's repair (it would bundle Tesseract).
       # Re-tag to manylinux while explicitly EXCLUDING the system OCR libs so the
