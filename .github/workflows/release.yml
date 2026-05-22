@@ -235,6 +235,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-normal-${{ matrix.platform.target }}
 
       - name: Build CLI (no python feature, static HDF5)
         shell: bash
@@ -278,6 +281,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-tesseract-${{ matrix.platform.target }}
 
       - name: Install Tesseract (Linux / apt)
         if: matrix.platform.os == 'linux'
