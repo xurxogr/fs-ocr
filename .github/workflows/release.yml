@@ -42,8 +42,8 @@ jobs:
           - { runner: macos-13,       target: x86_64,  os: macos }
           - { runner: macos-14,       target: aarch64, os: macos }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -71,7 +71,7 @@ jobs:
           python -m pip install --find-links dist --no-index fs-ocr
           python -c "import fs_ocr; print('version', fs_ocr.__version__); print('backend', fs_ocr.OCR_BACKEND)"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wheels-normal-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist/*.whl
@@ -80,13 +80,13 @@ jobs:
     name: normal · sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: sdist-normal
           path: dist/*.tar.gz
@@ -113,8 +113,8 @@ jobs:
           - { runner: macos-13,       target: x86_64,  os: macos }
           - { runner: macos-14,       target: aarch64, os: macos }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -178,7 +178,7 @@ jobs:
           rm -f dist/*.whl
           mv repaired/*.whl dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wheels-tesseract-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: dist/*.whl
@@ -187,7 +187,7 @@ jobs:
     name: tesseract · sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Rename distribution to fs-ocr-tesseract
         shell: bash
         run: |
@@ -198,7 +198,7 @@ jobs:
         with:
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: sdist-tesseract
           path: dist/*.tar.gz
@@ -226,7 +226,7 @@ jobs:
           - { runner: macos-13,       arch: x86_64,  os: macos,   target: x86_64-apple-darwin }
           - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform.target }}
@@ -252,7 +252,7 @@ jobs:
             echo "asset=$name.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: cli-normal-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
           path: ${{ steps.pkg.outputs.asset }}
@@ -269,7 +269,7 @@ jobs:
           - { runner: macos-13,       arch: x86_64,  os: macos,   target: x86_64-apple-darwin }
           - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform.target }}
@@ -314,7 +314,7 @@ jobs:
             echo "asset=$name.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: cli-tesseract-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
           path: ${{ steps.pkg.outputs.asset }}
@@ -328,7 +328,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: "cli-*"
           path: cli
@@ -348,7 +348,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Compare tag to Cargo.toml version
         shell: bash
         run: |
@@ -376,7 +376,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: "{wheels-normal-*,sdist-normal}"
           path: dist
@@ -392,7 +392,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: "{wheels-tesseract-*,sdist-tesseract}"
           path: dist
