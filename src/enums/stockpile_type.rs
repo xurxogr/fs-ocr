@@ -111,10 +111,11 @@ impl StockpileType {
 impl StockpileType {
     /// Classify stockpile type from OCR text (supports multiple languages).
     pub fn classify_from_text(value: &str) -> Self {
-        // Clean OCR artifacts
+        // Clean OCR artifacts: surrounding quotes, pipes, and dashes (the type
+        // label sometimes OCRs trailing rule characters, e.g. "Seaport ——").
         let cleaned = value
             .trim()
-            .trim_matches(|c| "'\"´`''«»|".contains(c))
+            .trim_matches(|c| "'\"´`''«»|—–-_".contains(c))
             .trim();
 
         if cleaned.is_empty() {
@@ -326,12 +327,112 @@ impl StockpileType {
             }
         }
 
-        StockpileType::Undefined
+        // Last resort: closest Latin name by edit distance. Catches misreads the
+        // fixed substitution table above misses (e.g. "Town Base" -> "Tawn Base").
+        Self::closest_latin_match(text)
+    }
+
+    /// All known type → translation lists.
+    fn all_translations() -> [(StockpileType, &'static [&'static str]); 12] {
+        [
+            (StockpileType::Encampment, Self::ENCAMPMENT),
+            (StockpileType::Keep, Self::KEEP),
+            (StockpileType::SafeHouse, Self::SAFE_HOUSE),
+            (StockpileType::RelicBase, Self::RELIC_BASE),
+            (StockpileType::BunkerBase, Self::BUNKER_BASE),
+            (StockpileType::BorderBase, Self::BORDER_BASE),
+            (StockpileType::TownBase, Self::TOWN_BASE),
+            (
+                StockpileType::UndergroundFortress,
+                Self::UNDERGROUND_FORTRESS,
+            ),
+            (StockpileType::BmsLonghook, Self::BMS_LONGHOOK),
+            (StockpileType::StorageDepot, Self::STORAGE_DEPOT),
+            (StockpileType::Seaport, Self::SEAPORT),
+            (StockpileType::AircraftDepot, Self::AIRCRAFT_DEPOT),
+        ]
+    }
+
+    /// Closest Latin (ASCII) translation by normalized edit distance.
+    ///
+    /// Only ASCII names are considered: CJK/Cyrillic OCR failures are not
+    /// single-character substitutions, so distance to those is meaningless and
+    /// could mis-classify. Accepts a match only above a confidence threshold.
+    fn closest_latin_match(text: &str) -> Self {
+        const MIN_SIMILARITY: f64 = 0.75;
+
+        let lowered = text.to_lowercase();
+        let candidate = lowered.as_str();
+        Self::all_translations()
+            .into_iter()
+            .flat_map(|(stype, names)| {
+                names
+                    .iter()
+                    .filter(|name| name.is_ascii())
+                    .map(move |name| {
+                        (
+                            stype,
+                            crate::text_utils::similarity(candidate, &name.to_lowercase()),
+                        )
+                    })
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .filter(|&(_, sim)| sim >= MIN_SIMILARITY)
+            .map(|(stype, _)| stype)
+            .unwrap_or(StockpileType::Undefined)
     }
 }
 
 impl fmt::Display for StockpileType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.display_name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_exact_names() {
+        assert_eq!(
+            StockpileType::from_string("Seaport"),
+            StockpileType::Seaport
+        );
+        assert_eq!(
+            StockpileType::from_string("Town Base"),
+            StockpileType::TownBase
+        );
+    }
+
+    #[test]
+    fn strips_trailing_ocr_rule_characters() {
+        // OCR of the type label sometimes appends rule dashes.
+        assert_eq!(
+            StockpileType::from_string("Seaport ——"),
+            StockpileType::Seaport
+        );
+        assert_eq!(
+            StockpileType::from_string("Seaport -"),
+            StockpileType::Seaport
+        );
+    }
+
+    #[test]
+    fn fuzzy_matches_single_char_misread() {
+        // Observed OCR misread of "Town Base".
+        assert_eq!(
+            StockpileType::from_string("Tawn Base"),
+            StockpileType::TownBase
+        );
+    }
+
+    #[test]
+    fn rejects_unrelated_text_as_undefined() {
+        assert_eq!(StockpileType::from_string(""), StockpileType::Undefined);
+        assert_eq!(
+            StockpileType::from_string("xyzzy"),
+            StockpileType::Undefined
+        );
     }
 }

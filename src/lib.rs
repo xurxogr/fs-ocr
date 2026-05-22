@@ -35,6 +35,7 @@ pub mod image_utils;
 pub mod models;
 pub mod ocr;
 pub mod template;
+pub mod text_utils;
 
 #[cfg(feature = "python")]
 use config::ScanConfig;

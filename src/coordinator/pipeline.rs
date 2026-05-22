@@ -13,6 +13,7 @@ const MAX_TOTAL_BOXES: usize = 200;
 
 use rayon::prelude::*;
 
+use super::debug_ocr;
 use crate::config::ScanConfig;
 use crate::detector::{BlackBoxDetector, DetectedRegions, GreyMaskDetector};
 use crate::enums::ItemFaction;
@@ -35,10 +36,17 @@ pub struct ScanPipeline {
     config: ScanConfig,
     /// Loaded template database (cached).
     database: Option<Arc<TemplateDatabase>>,
-    /// Text extractor for shard/timestamp. Multilingual under ocr-full
-    /// (the in-game timestamp line includes CJK/Cyrillic on those clients),
-    /// otherwise ocrs (Latin-only).
-    shard_extractor: Option<TextExtractor>,
+    /// Multilingual extractor for the shard/timestamp block on CJK/Cyrillic
+    /// clients. Reads the whole region (timestamp line + shard line) as one
+    /// block; the localized timestamp embeds CJK/Cyrillic, so it needs the full
+    /// `eng+chi_sim+rus` model. Routed to only when the client language detected
+    /// from the type region is Chinese or Russian.
+    block_extractor_multi: Option<TextExtractor>,
+    /// English-only extractor for the shard/timestamp block on Latin clients.
+    /// When the type region reads as non-CJK/non-Cyrillic the whole block is
+    /// Latin, so eng-only avoids the multilingual model misreading Latin text
+    /// (e.g. "ABLE" -> Cyrillic "АВЕЕ").
+    block_extractor_eng: Option<TextExtractor>,
     /// Text extractor for type/name (Tesseract if ocr-full, otherwise ocrs).
     text_extractor: Option<TextExtractor>,
 }
@@ -51,7 +59,8 @@ impl ScanPipeline {
             data_path: data_path.as_ref().to_string_lossy().to_string(),
             config,
             database: None,
-            shard_extractor: None,
+            block_extractor_multi: None,
+            block_extractor_eng: None,
             text_extractor: None,
         }
     }
@@ -69,20 +78,40 @@ impl ScanPipeline {
             self.database = Some(Arc::new(db));
         }
 
-        // Initialize shard extractor.
-        // Shard names are Latin ("ABLE", "CHARLIE", "Devbranch"), but the
-        // in-game timestamp line on CJK/Cyrillic clients embeds non-Latin
-        // characters (e.g. "Day"/"Hours" localized), so use the multilingual
-        // Tesseract extractor when available (ocr-full) and fall back to eng.
-        if self.shard_extractor.is_none() {
-            match TextExtractor::new_for_text_default("eng+chi_sim+rus") {
-                Ok(extractor) => self.shard_extractor = Some(extractor),
-                Err(_) => match TextExtractor::new_for_text_default("eng") {
-                    Ok(extractor) => self.shard_extractor = Some(extractor),
+        // Initialize the multilingual block extractor.
+        // The shard/timestamp region is read as one block. On CJK/Cyrillic
+        // clients the in-game timestamp line embeds non-Latin characters
+        // (e.g. localized "Day"/"Hours") that surround the digits and affect
+        // segmentation, so it MUST use the multilingual Tesseract model
+        // (ocr-full) and fall back to eng. Do NOT make this English-only — it
+        // has been tested; dropping the non-Latin langs breaks the number reads.
+        if self.block_extractor_multi.is_none() {
+            match TextExtractor::new_for_text_block_default("eng+chi_sim+rus") {
+                Ok(extractor) => self.block_extractor_multi = Some(extractor),
+                Err(_) => match TextExtractor::new_for_text_block_default("eng") {
+                    Ok(extractor) => self.block_extractor_multi = Some(extractor),
                     Err(e) => {
-                        eprintln!("Warning: Failed to initialize shard OCR: {}", e);
+                        eprintln!(
+                            "Warning: Failed to initialize multilingual block OCR: {}",
+                            e
+                        );
                     }
                 },
+            }
+        }
+
+        // Initialize the English-only block extractor.
+        // When the client language detected from the type region is neither
+        // Chinese nor Russian, the whole shard/timestamp block is Latin. The
+        // multilingual model misreads small Latin crops as Cyrillic
+        // (e.g. "DevBranch" -> "Беубгапсп"), so Latin clients read the block
+        // with this eng-only extractor instead.
+        if self.block_extractor_eng.is_none() {
+            match TextExtractor::new_for_text_block_default("eng") {
+                Ok(extractor) => self.block_extractor_eng = Some(extractor),
+                Err(e) => {
+                    eprintln!("Warning: Failed to initialize English block OCR: {}", e);
+                }
             }
         }
 
@@ -247,6 +276,11 @@ impl ScanPipeline {
         timing.blackbox_ms = Some(blackbox_ms);
         timing.greymask_ms = Some(greymask_ms);
 
+        // Optional: dump an annotated overlay of every detected region.
+        if debug_ocr::enabled() {
+            debug_ocr::save_regions_overlay(image, width as usize, height as usize, &regions);
+        }
+
         // Step 2: Extract quantities via OCR
         let quantity_start = Instant::now();
         let quantities = self.extract_quantities(image, width, height, &regions)?;
@@ -283,7 +317,10 @@ impl ScanPipeline {
     ) -> Result<()> {
         let scale_factor = regions.scale_factor;
 
-        // Extract stockpile type (may need multilingual support for Chinese/Russian)
+        // Extract stockpile type (may need multilingual support for Chinese/Russian).
+        // The type text also tells us the client language, which we use below to
+        // route the shard/timestamp block to the right OCR model.
+        let mut client_language = ClientLanguage::English;
         if let Some((x, y, w, h)) = regions.type_region {
             if let Some(extractor) = &self.text_extractor {
                 let type_img = extract_region(
@@ -300,71 +337,44 @@ impl ScanPipeline {
                 let (processed, proc_w, proc_h) =
                     preprocess_light_text(&type_img, w as usize, h as usize, scale_factor, 2.0);
 
+                if debug_ocr::enabled() {
+                    debug_ocr::save_gray("type", &processed, proc_w, proc_h);
+                }
+
                 if let Ok(text) = extractor.extract_text(
                     &processed,
                     proc_w as i32,
                     proc_h as i32,
                     1, // grayscale
                 ) {
+                    client_language = ClientLanguage::detect(&text);
                     let stockpile_type = StockpileType::from_string(&text);
                     stockpile.stockpile_type = stockpile_type;
                 }
             }
         }
 
-        // Extract shard and ingame timestamp.
-        // Region contains 2 lines: timestamp on top, shard name on bottom
-        // Split the region in half vertically and process each separately
+        // Extract shard and ingame timestamp. The region holds 2 lines:
+        // timestamp on top, shard name on bottom.
+        //
+        // The OCR model is picked by the client language detected from the type
+        // above: Latin clients use the eng-only extractor (the multilingual model
+        // misreads small Latin text as Cyrillic), CJK/Cyrillic clients use the
+        // multilingual one (their timestamp line embeds non-Latin glyphs).
         if let Some((x, y, w, h)) = regions.shard_region {
-            if let Some(engine) = &self.shard_extractor {
-                let half_h = h / 2;
+            let engine = match client_language {
+                ClientLanguage::English => self
+                    .block_extractor_eng
+                    .as_ref()
+                    .or(self.block_extractor_multi.as_ref()),
+                ClientLanguage::Chinese | ClientLanguage::Russian => self
+                    .block_extractor_multi
+                    .as_ref()
+                    .or(self.block_extractor_eng.as_ref()),
+            };
 
-                // Top half: timestamp line ("Day 702, 0304 Hours")
-                let timestamp_img = extract_region(
-                    image,
-                    width as usize,
-                    height as usize,
-                    x.max(0) as usize,
-                    y.max(0) as usize,
-                    w as usize,
-                    half_h as usize,
-                );
-
-                let (processed, proc_w, proc_h) =
-                    preprocess_for_shard(&timestamp_img, w as usize, half_h as usize);
-
-                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
-                    let timestamp = extract_day_and_hour(&text);
-                    if !timestamp.is_empty() {
-                        stockpile.ingame_timestamp = Some(timestamp);
-                    }
-                }
-
-                // Bottom half: shard name ("ABLE", "CHARLIE", "Devbranch")
-                let shard_img = extract_region(
-                    image,
-                    width as usize,
-                    height as usize,
-                    x.max(0) as usize,
-                    (y + half_h).max(0) as usize,
-                    w as usize,
-                    half_h as usize,
-                );
-
-                // Use higher upscaling for small shard text (4x instead of 2x)
-                let (processed, proc_w, proc_h) =
-                    preprocess_for_shard(&shard_img, w as usize, half_h as usize);
-
-                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
-                    let text_upper = text.to_uppercase();
-                    if text_upper.contains("ABLE") {
-                        stockpile.shard = Some("ABLE".to_string());
-                    } else if text_upper.contains("CHARLIE") {
-                        stockpile.shard = Some("CHARLIE".to_string());
-                    } else if text_upper.contains("DEVBRANCH") || text_upper.contains("DEV") {
-                        stockpile.shard = Some("Devbranch".to_string());
-                    }
-                }
+            if let Some(engine) = engine {
+                self.read_shard_region(image, width, height, (x, y, w, h), engine, stockpile);
             }
         }
 
@@ -387,28 +397,40 @@ impl ScanPipeline {
                     let (processed, proc_w, proc_h) =
                         preprocess_light_text(&name_img, w as usize, h as usize, scale_factor, 4.0);
 
-                    // Split into lines if multiline, OCR each, then join
+                    // The game wraps long names across two rows. Detect genuine
+                    // row wrapping (a tall blank gap between text bands) and, when
+                    // present, lay the rows side by side into a single logical line
+                    // before OCR. This both reconstructs the original name and lets
+                    // Tesseract use line context — isolated single glyphs (e.g. a
+                    // lone CJK character per row) are otherwise misread.
                     let lines = split_text_lines(&processed, proc_w, proc_h);
-                    let mut line_texts: Vec<String> = Vec::new();
 
-                    for (line_img, line_w, line_h) in &lines {
-                        if let Ok(text) = extractor.extract_text(
-                            line_img,
-                            *line_w as i32,
-                            *line_h as i32,
-                            1, // grayscale
-                        ) {
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty() {
-                                line_texts.push(trimmed.to_string());
+                    if debug_ocr::enabled() {
+                        if lines.len() > 1 {
+                            for (i, (buf, lw, lh)) in lines.iter().enumerate() {
+                                debug_ocr::save_gray(&format!("name_line{i}"), buf, *lw, *lh);
                             }
+                        } else {
+                            debug_ocr::save_gray("name", &processed, proc_w, proc_h);
                         }
                     }
 
-                    if !line_texts.is_empty() {
-                        let name = join_multiline_name(&line_texts.join("\n"));
+                    let (ocr_img, ocr_w, ocr_h) = if lines.len() > 1 {
+                        join_lines_horizontally(&lines)
+                    } else {
+                        (processed, proc_w, proc_h)
+                    };
+
+                    if debug_ocr::enabled() && lines.len() > 1 {
+                        debug_ocr::save_gray("name_merged", &ocr_img, ocr_w, ocr_h);
+                    }
+
+                    if let Ok(text) =
+                        extractor.extract_text(&ocr_img, ocr_w as i32, ocr_h as i32, 1)
+                    {
+                        let name = text.trim();
                         if !name.is_empty() {
-                            stockpile.name = Some(name);
+                            stockpile.name = Some(name.to_string());
                         }
                     }
                 }
@@ -424,6 +446,133 @@ impl ScanPipeline {
         }
 
         Ok(())
+    }
+
+    /// Read the timestamp and shard name from the shard region.
+    ///
+    /// The reading strategy differs by OCR backend (selected at compile time):
+    ///
+    /// - **Tesseract (`ocr-full`)**: read the whole region as one block. PSM 6
+    ///   segments the two lines internally, and on CJK/Cyrillic clients this is
+    ///   what reads the localized timestamp correctly — splitting it first
+    ///   regressed those reads, so we deliberately do not split here.
+    /// - **ocrs (default)**: ocrs recognizes a single rect with no line
+    ///   detection, so a 2-line crop collapses into garbage. We split the region
+    ///   into its top (timestamp) and bottom (shard) halves and read each as a
+    ///   single line. ocrs is Latin-only, so CJK/Cyrillic clients are out of
+    ///   scope for this backend regardless.
+    #[cfg(feature = "ocr-full")]
+    fn read_shard_region(
+        &self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+        region: (i32, i32, i32, i32),
+        engine: &TextExtractor,
+        stockpile: &mut Stockpile,
+    ) {
+        let (x, y, w, h) = region;
+        let block_img = extract_region(
+            image,
+            width as usize,
+            height as usize,
+            x.max(0) as usize,
+            y.max(0) as usize,
+            w as usize,
+            h as usize,
+        );
+
+        // The region is two text lines; upscale toward a legible per-line height
+        // so low-res crops stay readable as a block.
+        let (processed, proc_w, proc_h) =
+            preprocess_for_shard(&block_img, w as usize, h as usize, 2);
+
+        if debug_ocr::enabled() {
+            debug_ocr::save_gray("shard_block", &processed, proc_w, proc_h);
+        }
+
+        if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
+            // PSM 6 reads the block as multiple lines. Classify each: the line
+            // carrying the digits is the timestamp, the line matching a known
+            // shard is the shard name.
+            for line in text.lines() {
+                let timestamp = extract_day_and_hour(line);
+                if !timestamp.is_empty() {
+                    stockpile.ingame_timestamp = Some(timestamp);
+                    break;
+                }
+            }
+            for line in text.lines() {
+                if let Some(shard) = match_shard_name(line) {
+                    stockpile.shard = Some(shard.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    /// See the `ocr-full` variant above for the rationale behind the per-backend
+    /// split. This (ocrs) path reads the timestamp and shard as two single-line
+    /// half-crops.
+    #[cfg(not(feature = "ocr-full"))]
+    fn read_shard_region(
+        &self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+        region: (i32, i32, i32, i32),
+        engine: &TextExtractor,
+        stockpile: &mut Stockpile,
+    ) {
+        let (x, y, w, h) = region;
+        let half_h = h / 2;
+
+        // Top half: timestamp line ("Day 702, 0304 Hours").
+        let timestamp_img = extract_region(
+            image,
+            width as usize,
+            height as usize,
+            x.max(0) as usize,
+            y.max(0) as usize,
+            w as usize,
+            half_h as usize,
+        );
+        let (processed, proc_w, proc_h) =
+            preprocess_for_shard(&timestamp_img, w as usize, half_h as usize, 1);
+
+        if debug_ocr::enabled() {
+            debug_ocr::save_gray("timestamp", &processed, proc_w, proc_h);
+        }
+
+        if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
+            let timestamp = extract_day_and_hour(&text);
+            if !timestamp.is_empty() {
+                stockpile.ingame_timestamp = Some(timestamp);
+            }
+        }
+
+        // Bottom half: shard name ("ABLE", "CHARLIE", "Devbranch").
+        let shard_img = extract_region(
+            image,
+            width as usize,
+            height as usize,
+            x.max(0) as usize,
+            (y + half_h).max(0) as usize,
+            w as usize,
+            half_h as usize,
+        );
+        let (processed, proc_w, proc_h) =
+            preprocess_for_shard(&shard_img, w as usize, half_h as usize, 1);
+
+        if debug_ocr::enabled() {
+            debug_ocr::save_gray("shard", &processed, proc_w, proc_h);
+        }
+
+        if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
+            if let Some(shard) = match_shard_name(&text) {
+                stockpile.shard = Some(shard.to_string());
+            }
+        }
     }
 
     /// Extract quantities using template-based digit matching.
@@ -829,117 +978,151 @@ fn extract_region(
     region
 }
 
-/// Split multiline text into separate line images.
-/// Returns a vector of (image, width, height) tuples, one per line.
+/// Split a name buffer into separate row images when the game has wrapped the
+/// name across multiple rows.
+///
+/// Returns one (image, width, height) tuple per detected text row. A single row
+/// is returned unchanged (the whole buffer). Rows are only split apart on a
+/// genuine blank gap — a run of consecutive rows with no text pixels that is
+/// tall relative to the text itself — so the internal horizontal gaps inside a
+/// glyph (e.g. between the strokes of a CJK character) never cause a false
+/// split, and a normal single line is never cut through its x-height.
 fn split_text_lines(image: &[u8], width: usize, height: usize) -> Vec<(Vec<u8>, usize, usize)> {
-    // Find vertical bounds of text (bright pixels > 200)
-    let mut min_y = height;
-    let mut max_y = 0;
-    for y in 0..height {
-        for x in 0..width {
-            if image[y * width + x] > 200 {
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-        }
-    }
+    let bands = detect_text_bands(image, width, height);
 
-    let text_height = if max_y >= min_y { max_y - min_y + 1 } else { 0 };
-
-    // If text doesn't fill most of height, return as single line
-    if text_height < height * 60 / 100 {
+    // 0 or 1 band: not a wrapped name — return the whole buffer untouched so the
+    // OCR engine sees the line with its original surrounding margin.
+    if bands.len() <= 1 {
         return vec![(image.to_vec(), width, height)];
     }
 
-    // Find the gap between lines: row with fewest bright pixels in the middle region
-    let search_start = min_y + text_height / 4;
-    let search_end = min_y + text_height * 3 / 4;
-
-    let mut min_bright = width + 1;
-    let mut split_y = (search_start + search_end) / 2;
-
-    for y in search_start..search_end {
-        let bright_count = (0..width).filter(|&x| image[y * width + x] > 200).count();
-        if bright_count < min_bright {
-            min_bright = bright_count;
-            split_y = y;
-        }
-    }
-
-    // If no clear gap found (min_bright > 20% of width), return as single line
-    if min_bright > width / 5 {
-        return vec![(image.to_vec(), width, height)];
-    }
-
-    // Extract and tight-crop each line
-    fn extract_tight_line(
-        image: &[u8],
-        width: usize,
-        y_start: usize,
-        y_end: usize,
-    ) -> (Vec<u8>, usize, usize) {
-        // Find actual text bounds within this line region
-        let mut line_min_y = y_end;
-        let mut line_max_y = y_start;
-        let mut line_min_x = width;
-        let mut line_max_x = 0;
-
-        for y in y_start..y_end {
-            for x in 0..width {
-                if image[y * width + x] > 200 {
-                    line_min_y = line_min_y.min(y);
-                    line_max_y = line_max_y.max(y);
-                    line_min_x = line_min_x.min(x);
-                    line_max_x = line_max_x.max(x);
-                }
-            }
-        }
-
-        if line_max_y < line_min_y || line_max_x < line_min_x {
-            // No text found, return empty
-            return (vec![144u8; 1], 1, 1);
-        }
-
-        // Add small padding
-        let pad = 2;
-        let crop_x = line_min_x.saturating_sub(pad);
-        let crop_y = line_min_y.saturating_sub(pad);
-        let crop_w = (line_max_x - line_min_x + 1 + pad * 2).min(width - crop_x);
-        let crop_h = (line_max_y - line_min_y + 1 + pad * 2).min(y_end - crop_y);
-
-        let mut cropped = vec![144u8; crop_w * crop_h];
-        for y in 0..crop_h {
-            for x in 0..crop_w {
-                cropped[y * crop_w + x] = image[(crop_y + y) * width + crop_x + x];
-            }
-        }
-
-        (cropped, crop_w, crop_h)
-    }
-
-    let top_line = extract_tight_line(image, width, min_y, split_y);
-    let bottom_line = extract_tight_line(image, width, split_y + 1, max_y + 1);
-
-    vec![top_line, bottom_line]
+    bands
+        .iter()
+        .map(|&(y_start, y_end)| extract_tight_line(image, width, y_start, y_end))
+        .collect()
 }
 
-/// Join multiline name text.
-/// If a line ends with '-', concatenate directly; otherwise add a space.
-fn join_multiline_name(text: &str) -> String {
-    let mut result = String::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if result.is_empty() || result.ends_with('-') {
-            result.push_str(trimmed);
-        } else {
-            result.push(' ');
-            result.push_str(trimmed);
+/// Find vertical text bands separated by genuine blank gaps.
+///
+/// A row is "text" if it contains any bright pixel (> 200; text is bright on a
+/// dark background after autocontrast). Contiguous text rows form a raw band;
+/// raw bands separated by a blank run shorter than `gap_min` are merged so that
+/// intra-glyph gaps stay within a single band. `gap_min` scales with the
+/// tallest band so the threshold adapts to the rendered text size.
+fn detect_text_bands(image: &[u8], width: usize, height: usize) -> Vec<(usize, usize)> {
+    let row_has_text: Vec<bool> = (0..height)
+        .map(|y| (0..width).any(|x| image[y * width + x] > 200))
+        .collect();
+
+    let mut raw: Vec<(usize, usize)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (y, &has_text) in row_has_text.iter().enumerate() {
+        match (has_text, start) {
+            (true, None) => start = Some(y),
+            (false, Some(s)) => {
+                raw.push((s, y));
+                start = None;
+            }
+            _ => {}
         }
     }
-    result
+    if let Some(s) = start {
+        raw.push((s, height));
+    }
+
+    if raw.is_empty() {
+        return raw;
+    }
+
+    let tallest = raw.iter().map(|&(s, e)| e - s).max().unwrap_or(0);
+    let gap_min = (tallest / 6).max(8);
+
+    let mut merged: Vec<(usize, usize)> = vec![raw[0]];
+    for &(s, e) in &raw[1..] {
+        let last = merged.last_mut().unwrap();
+        if s - last.1 < gap_min {
+            last.1 = e;
+        } else {
+            merged.push((s, e));
+        }
+    }
+    merged
+}
+
+/// Tight-crop the text within a row band, with a small padding margin.
+fn extract_tight_line(
+    image: &[u8],
+    width: usize,
+    y_start: usize,
+    y_end: usize,
+) -> (Vec<u8>, usize, usize) {
+    let mut line_min_y = y_end;
+    let mut line_max_y = y_start;
+    let mut line_min_x = width;
+    let mut line_max_x = 0;
+
+    for y in y_start..y_end {
+        for x in 0..width {
+            if image[y * width + x] > 200 {
+                line_min_y = line_min_y.min(y);
+                line_max_y = line_max_y.max(y);
+                line_min_x = line_min_x.min(x);
+                line_max_x = line_max_x.max(x);
+            }
+        }
+    }
+
+    if line_max_y < line_min_y || line_max_x < line_min_x {
+        return (vec![0u8; 1], 1, 1);
+    }
+
+    let pad = 2;
+    let crop_x = line_min_x.saturating_sub(pad);
+    let crop_y = line_min_y.saturating_sub(pad);
+    let crop_w = (line_max_x - line_min_x + 1 + pad * 2).min(width - crop_x);
+    let crop_h = (line_max_y - line_min_y + 1 + pad * 2).min(y_end - crop_y);
+
+    let mut cropped = vec![0u8; crop_w * crop_h];
+    for y in 0..crop_h {
+        for x in 0..crop_w {
+            cropped[y * crop_w + x] = image[(crop_y + y) * width + crop_x + x];
+        }
+    }
+
+    (cropped, crop_w, crop_h)
+}
+
+/// Lay wrapped name rows side by side into one logical line for OCR.
+///
+/// The game wraps a single name across rows; reassembling them horizontally
+/// reconstructs the original line so the OCR engine reads it with proper line
+/// context (a lone glyph per row is otherwise misread). Rows are placed
+/// left-to-right on a dark canvas with a small inter-row gap and a quiet-zone
+/// border, each vertically centred.
+fn join_lines_horizontally(lines: &[(Vec<u8>, usize, usize)]) -> (Vec<u8>, usize, usize) {
+    const GAP: usize = 16;
+    const PAD: usize = 30;
+
+    let inner_h = lines.iter().map(|&(_, _, h)| h).max().unwrap_or(0);
+    let inner_w: usize =
+        lines.iter().map(|&(_, w, _)| w).sum::<usize>() + GAP * lines.len().saturating_sub(1);
+
+    let canvas_w = inner_w + 2 * PAD;
+    let canvas_h = inner_h + 2 * PAD;
+    let mut canvas = vec![0u8; canvas_w * canvas_h];
+
+    let mut x_off = PAD;
+    for (line, lw, lh) in lines {
+        let y_off = PAD + (inner_h - lh) / 2;
+        for y in 0..*lh {
+            for x in 0..*lw {
+                canvas[(y_off + y) * canvas_w + (x_off + x)] = line[y * lw + x];
+            }
+        }
+        x_off += lw + GAP;
+    }
+
+    (canvas, canvas_w, canvas_h)
 }
 
 /// Preprocess light text on dark background (type, name).
@@ -954,71 +1137,94 @@ fn preprocess_light_text(
     scale_factor: f64,
     upscale_base: f64,
 ) -> (Vec<u8>, usize, usize) {
-    // Convert RGB to grayscale with minimum brightness boost
+    // Convert RGB to grayscale.
     let mut grayscale = Vec::with_capacity(width * height);
-    let mut raw_gray = Vec::with_capacity(width * height);
     for chunk in image.chunks_exact(3) {
         let luma =
             ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128)
                 >> 8) as u8;
-        raw_gray.push(luma);
-        grayscale.push(luma.max(144));
+        grayscale.push(luma);
     }
 
-    // Find tight bounds around bright pixels (luma > 200)
-    let mut min_x = width;
-    let mut min_y = height;
-    let mut max_x = 0usize;
-    let mut max_y = 0usize;
+    // Stretch contrast so text becomes legible regardless of base brightness.
+    // The previous approach floored brightness and cropped around near-white
+    // pixels, which only worked for bright text on a dark info bar. Localized
+    // names like the Chinese "公共" are low-contrast grey-on-grey and were
+    // washed out; autocontrast normalizes both cases to full dynamic range.
+    autocontrast(&mut grayscale, 2);
 
-    for y in 0..height {
-        for x in 0..width {
-            if raw_gray[y * width + x] > 200 {
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-        }
-    }
-
-    // If no bright pixels found, use full image
+    // Upscale for better OCR.
     let upscale = upscale_base / scale_factor;
-    if min_x > max_x || min_y > max_y {
-        let new_w = ((width as f64) * upscale) as usize;
-        let new_h = ((height as f64) * upscale) as usize;
-        let upscaled = preprocess::upscale_bilinear(&grayscale, width, height, new_w, new_h);
-        return (upscaled, new_w, new_h);
-    }
-
-    // Add padding around tight bounds
-    let padding = height / 8;
-    let crop_x1 = min_x.saturating_sub(padding);
-    let crop_y1 = min_y.saturating_sub(padding);
-    let crop_x2 = (max_x + 1 + padding).min(width);
-    let crop_y2 = (max_y + 1 + padding).min(height);
-    let crop_w = crop_x2 - crop_x1;
-    let crop_h = crop_y2 - crop_y1;
-
-    // Extract tight crop from boosted grayscale
-    let mut cropped = Vec::with_capacity(crop_w * crop_h);
-    for y in crop_y1..crop_y2 {
-        for x in crop_x1..crop_x2 {
-            cropped.push(grayscale[y * width + x]);
-        }
-    }
-
-    // Upscale the tight crop
-    let new_w = ((crop_w as f64) * upscale) as usize;
-    let new_h = ((crop_h as f64) * upscale) as usize;
-    let upscaled = preprocess::upscale_bilinear(&cropped, crop_w, crop_h, new_w, new_h);
+    let new_w = ((width as f64) * upscale) as usize;
+    let new_h = ((height as f64) * upscale) as usize;
+    let upscaled = preprocess::upscale_bilinear(&grayscale, width, height, new_w, new_h);
 
     (upscaled, new_w, new_h)
 }
 
+/// Stretch the grayscale histogram to full [0, 255] range in place.
+///
+/// Mirrors PIL's `ImageOps.autocontrast`: `cutoff_percent` of the pixel
+/// population is clipped from each end of the histogram before computing the
+/// low/high bounds, so a few outlier pixels don't dominate the mapping.
+fn autocontrast(gray: &mut [u8], cutoff_percent: u32) {
+    if gray.is_empty() {
+        return;
+    }
+
+    let mut hist = [0u32; 256];
+    for &v in gray.iter() {
+        hist[v as usize] += 1;
+    }
+
+    let cut = (gray.len() as u32 * cutoff_percent) / 100;
+
+    // Lowest value with population remaining after clipping `cut` from the bottom.
+    let mut acc = 0u32;
+    let mut lo = 0usize;
+    for (v, &count) in hist.iter().enumerate() {
+        acc += count;
+        if acc > cut {
+            lo = v;
+            break;
+        }
+    }
+
+    // Highest value with population remaining after clipping `cut` from the top.
+    let mut acc = 0u32;
+    let mut hi = 255usize;
+    for (v, &count) in hist.iter().enumerate().rev() {
+        acc += count;
+        if acc > cut {
+            hi = v;
+            break;
+        }
+    }
+
+    if hi <= lo {
+        return; // Flat or inverted range — nothing to stretch.
+    }
+
+    let span = (hi - lo) as f32;
+    for v in gray.iter_mut() {
+        let clamped = (*v as usize).clamp(lo, hi);
+        *v = (((clamped - lo) as f32 / span) * 255.0).round() as u8;
+    }
+}
+
 /// Preprocess for shard/timestamp text.
-/// Converts to grayscale with minimum brightness boost for better OCR.
-fn preprocess_for_shard(image: &[u8], width: usize, height: usize) -> (Vec<u8>, usize, usize) {
+///
+/// Converts to grayscale and stretches the histogram to full range. The earlier
+/// `luma.max(144)` brightness floor assumed bright text on a dark bar; on the
+/// dark UI theme the text is dark on a dark panel, so flooring collapsed the
+/// whole region to a flat grey and erased the text. Autocontrast normalizes
+/// both themes to full dynamic range while preserving polarity.
+fn preprocess_for_shard(
+    image: &[u8],
+    width: usize,
+    height: usize,
+    lines: usize,
+) -> (Vec<u8>, usize, usize) {
     let mut processed = Vec::with_capacity(width * height);
 
     for chunk in image.chunks_exact(3) {
@@ -1026,51 +1232,136 @@ fn preprocess_for_shard(image: &[u8], width: usize, height: usize) -> (Vec<u8>, 
         let luma =
             ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128)
                 >> 8) as u8;
-        // Boost minimum brightness to help OCR recognize bright text on dark backgrounds
-        processed.push(luma.max(144));
+        processed.push(luma);
+    }
+
+    autocontrast(&mut processed, 2);
+
+    // Upscale tiny regions toward a legible line height. At low resolutions a
+    // single shard/timestamp line can be ~13px tall, below what Tesseract reads
+    // reliably; scaling it up recovers the text. The factor targets a per-line
+    // height (the region stacks `lines` text rows) rather than blindly
+    // multiplying — over-upscaling blurs and hurts OCR.
+    const TARGET_LINE_HEIGHT: usize = 26;
+    let line_height = (height / lines.max(1)).max(1);
+    let factor = ((TARGET_LINE_HEIGHT + line_height / 2) / line_height).max(1);
+    if factor > 1 {
+        let new_w = width * factor;
+        let new_h = height * factor;
+        let upscaled = preprocess::upscale_bilinear(&processed, width, height, new_w, new_h);
+        return (upscaled, new_w, new_h);
     }
 
     (processed, width, height)
 }
 
+/// Client UI language, inferred from the stockpile type text.
+///
+/// Used to route the shard/timestamp block to the right OCR model: Latin
+/// clients read it with an eng-only model, CJK/Cyrillic clients with the
+/// multilingual one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientLanguage {
+    English,
+    Chinese,
+    Russian,
+}
+
+impl ClientLanguage {
+    /// Detect the client language from OCR'd type text by script.
+    ///
+    /// CJK ideographs imply the Chinese client; Cyrillic implies the Russian
+    /// client; anything else is treated as a Latin (English) client.
+    fn detect(text: &str) -> Self {
+        let has_cjk = text.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
+        if has_cjk {
+            return ClientLanguage::Chinese;
+        }
+        let has_cyrillic = text.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+        if has_cyrillic {
+            return ClientLanguage::Russian;
+        }
+        ClientLanguage::English
+    }
+}
+
+/// Known shard names. The shard-name crop is a single Latin word.
+const KNOWN_SHARDS: [&str; 3] = ["ABLE", "CHARLIE", "Devbranch"];
+
+/// Match OCR'd shard text to the closest known shard name.
+///
+/// At low resolutions OCR garbles a character or two (e.g. "Devbranch" reads as
+/// "Vevoranch" when the `D`'s stem blurs), so exact substring matching fails.
+/// We instead pick the known shard with the highest character similarity and
+/// accept it only above a confidence threshold — close enough to absorb a couple
+/// of misread glyphs, strict enough to reject unrelated text.
+fn match_shard_name(text: &str) -> Option<&'static str> {
+    const MIN_SIMILARITY: f64 = 0.6;
+
+    let candidate = text.trim().to_lowercase();
+    if candidate.is_empty() {
+        return None;
+    }
+
+    KNOWN_SHARDS
+        .iter()
+        .map(|&shard| {
+            (
+                shard,
+                crate::text_utils::similarity(&candidate, &shard.to_lowercase()),
+            )
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|&(_, similarity)| similarity >= MIN_SIMILARITY)
+        .map(|(shard, _)| shard)
+}
+
 /// Extract day and hour from in-game timestamp text.
 /// Expects format like "Day 1234, 2056 Hours" -> "1234, 20:56".
+///
+/// The day/time separator is unreliable across locales: the English client
+/// emits an ASCII comma, the Chinese client a fullwidth comma (`，`), and OCR
+/// sometimes drops it entirely. So we don't depend on it — the time is always
+/// the trailing 4 digits (HHMM) and the day is whatever precedes them.
 fn extract_day_and_hour(text: &str) -> String {
-    // Extract all digit/comma sequences
-    let mut result = String::new();
-    for c in text.chars() {
-        if c.is_ascii_digit() || c == ',' {
-            result.push(c);
-        }
+    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+
+    // Need at least the 4 time digits plus 1 day digit. Fewer than 5 means we
+    // can't tell the day from the time, so treat it as noise.
+    if digits.len() < 5 {
+        return String::new();
     }
 
-    // Remove first comma if exactly two commas (e.g., "1,234,2056" -> "1234,2056")
-    if result.matches(',').count() == 2 {
-        if let Some(idx) = result.find(',') {
-            result.remove(idx);
-        }
-    }
-
-    // Split by first comma and format time
-    if let Some(comma_idx) = result.find(',') {
-        let left = &result[..comma_idx];
-        let right = &result[comma_idx + 1..];
-
-        // Extract only digits from right side
-        let digits: String = right.chars().filter(|c| c.is_ascii_digit()).collect();
-
-        // Format as HH:MM if we have exactly 4 digits
-        if digits.len() == 4 {
-            return format!("{}, {}:{}", left, &digits[..2], &digits[2..]);
-        }
-    }
-
-    result
+    let split = digits.len() - 4;
+    let day = &digits[..split];
+    let hhmm = &digits[split..];
+    format!("{}, {}:{}", day, &hhmm[..2], &hhmm[2..])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn match_shard_name_matches_exact_names() {
+        assert_eq!(match_shard_name("ABLE"), Some("ABLE"));
+        assert_eq!(match_shard_name("CHARLIE"), Some("CHARLIE"));
+        assert_eq!(match_shard_name("Devbranch"), Some("Devbranch"));
+    }
+
+    #[test]
+    fn match_shard_name_tolerates_low_res_misreads() {
+        // Observed eng OCR on a 1600x900 crop: the blurred `D` reads as `V`.
+        assert_eq!(match_shard_name("Vevoranch"), Some("Devbranch"));
+        assert_eq!(match_shard_name("DevBranch"), Some("Devbranch"));
+    }
+
+    #[test]
+    fn match_shard_name_rejects_unrelated_and_empty() {
+        assert_eq!(match_shard_name(""), None);
+        assert_eq!(match_shard_name("   "), None);
+        assert_eq!(match_shard_name("Public"), None);
+    }
 
     #[test]
     fn test_extract_region() {
@@ -1098,10 +1389,112 @@ mod tests {
 
     #[test]
     fn extracts_day_and_hour_from_cjk_and_cyrillic_text() {
-        // CJK/Cyrillic clients surround the digits with non-Latin characters.
-        // Only ASCII digits/commas are kept, so the result must still be clean.
-        assert_eq!(extract_day_and_hour("第 702 天, 0304 小时"), "702, 03:04");
+        // The Chinese client uses a fullwidth comma (`，`, U+FF0C), not ASCII.
+        assert_eq!(extract_day_and_hour("第 1529 天，0851 小时"), "1529, 08:51");
         assert_eq!(extract_day_and_hour("День 702, 0304 часов"), "702, 03:04");
+    }
+
+    #[test]
+    fn extracts_day_and_hour_when_separator_is_dropped() {
+        // OCR sometimes drops the separator entirely (observed on a real
+        // Chinese screenshot): "Day 1529, 0851" read as bare "15290851".
+        assert_eq!(extract_day_and_hour("15290851"), "1529, 08:51");
+        assert_eq!(extract_day_and_hour("7020304"), "702, 03:04");
+    }
+
+    #[test]
+    fn day_is_unbounded_only_time_is_fixed_width() {
+        // Whatever the digit count, the last 4 are HH:MM and the rest is the day.
+        assert_eq!(extract_day_and_hour("123456789"), "12345, 67:89");
+    }
+
+    #[test]
+    fn rejects_timestamp_noise() {
+        assert_eq!(extract_day_and_hour(""), "");
+        assert_eq!(extract_day_and_hour("0851"), ""); // 4 digits: can't tell day from time
+    }
+
+    #[test]
+    fn autocontrast_stretches_to_full_range() {
+        // A low-contrast band [100, 140] should stretch to span [0, 255].
+        let mut gray: Vec<u8> = (0..1000)
+            .map(|i| 100 + (i % 41) as u8) // values in [100, 140]
+            .collect();
+        autocontrast(&mut gray, 0);
+        assert_eq!(*gray.iter().min().unwrap(), 0);
+        assert_eq!(*gray.iter().max().unwrap(), 255);
+    }
+
+    #[test]
+    fn autocontrast_handles_flat_input() {
+        // A uniform image has hi == lo; it must be left untouched, not divided by zero.
+        let mut gray = vec![128u8; 256];
+        autocontrast(&mut gray, 2);
+        assert!(gray.iter().all(|&v| v == 128));
+    }
+
+    #[test]
+    fn autocontrast_ignores_empty() {
+        let mut gray: Vec<u8> = Vec::new();
+        autocontrast(&mut gray, 2); // must not panic
+        assert!(gray.is_empty());
+    }
+
+    /// Build a grayscale buffer where the given inclusive row ranges are "text"
+    /// (a single bright pixel per row) and everything else is background.
+    fn buffer_with_text_rows(width: usize, height: usize, rows: &[(usize, usize)]) -> Vec<u8> {
+        let mut buf = vec![0u8; width * height];
+        for &(start, end) in rows {
+            for y in start..=end {
+                buf[y * width] = 255; // one bright pixel marks the row as text
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn detect_text_bands_merges_single_block() {
+        // One continuous block of text -> exactly one band.
+        let buf = buffer_with_text_rows(10, 100, &[(20, 80)]);
+        let bands = detect_text_bands(&buf, 10, 100);
+        assert_eq!(bands.len(), 1);
+    }
+
+    #[test]
+    fn detect_text_bands_splits_on_tall_gap() {
+        // Two blocks separated by a tall blank gap -> two bands (wrapped name).
+        let buf = buffer_with_text_rows(10, 120, &[(0, 30), (70, 100)]);
+        let bands = detect_text_bands(&buf, 10, 120);
+        assert_eq!(bands.len(), 2);
+    }
+
+    #[test]
+    fn detect_text_bands_ignores_small_intra_glyph_gap() {
+        // A short blank run inside a glyph must not split the band.
+        let buf = buffer_with_text_rows(10, 100, &[(20, 50), (53, 80)]); // 2-row gap
+        let bands = detect_text_bands(&buf, 10, 100);
+        assert_eq!(bands.len(), 1);
+    }
+
+    #[test]
+    fn split_text_lines_returns_whole_buffer_for_single_row() {
+        let buf = buffer_with_text_rows(10, 100, &[(20, 80)]);
+        let lines = split_text_lines(&buf, 10, 100);
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].1, lines[0].2), (10, 100)); // unchanged dimensions
+    }
+
+    #[test]
+    fn join_lines_horizontally_places_rows_side_by_side() {
+        // Two 4x4 white tiles -> width grows, height is single row + padding.
+        let a = (vec![255u8; 16], 4, 4);
+        let b = (vec![255u8; 16], 4, 4);
+        let (canvas, w, h) = join_lines_horizontally(&[a, b]);
+        assert_eq!(w, 4 + 4 + 16 + 2 * 30); // widths + GAP + 2*PAD
+        assert_eq!(h, 4 + 2 * 30); // tallest row + 2*PAD
+        assert_eq!(canvas.len(), w * h);
+        // The quiet-zone border stays background (dark).
+        assert_eq!(canvas[0], 0);
     }
 
     #[test]

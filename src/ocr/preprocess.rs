@@ -157,8 +157,12 @@ pub fn upscale_bilinear(
 
     for y in 0..dst_height {
         for x in 0..dst_width {
-            let src_x = x as f64 * x_ratio;
-            let src_y = y as f64 * y_ratio;
+            // Sample at pixel centers (PIL/OpenCV convention): map the centre of
+            // each destination pixel back to source space. The naive `x * ratio`
+            // mapping biases sampling by half a pixel, which smears thin strokes
+            // on upscale — enough to drop the `氵` radical of `海` (read as `每`).
+            let src_x = ((x as f64 + 0.5) * x_ratio - 0.5).max(0.0);
+            let src_y = ((y as f64 + 0.5) * y_ratio - 0.5).max(0.0);
 
             let x0 = src_x.floor() as usize;
             let y0 = src_y.floor() as usize;

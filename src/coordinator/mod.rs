@@ -1,5 +1,6 @@
 //! Pipeline orchestration for stockpile scanning.
 
+mod debug_ocr;
 mod pipeline;
 mod validation;
 
