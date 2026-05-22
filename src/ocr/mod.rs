@@ -6,17 +6,22 @@
 //!
 //! Build with `--features ocr-full` to enable Tesseract backend.
 
-pub mod basic;
 pub mod digit_matcher;
 pub mod engine;
 pub mod preprocess;
 pub mod quantity;
+
+// Pure-Rust ocrs backend (default). Excluded from ocr-full builds so the
+// Tesseract distribution doesn't ship the embedded 9MB recognition model.
+#[cfg(not(feature = "ocr-full"))]
+pub mod basic;
 
 // Tesseract backend (requires system Tesseract installation)
 #[cfg(feature = "ocr-full")]
 pub mod tesseract;
 
 // Re-exports
+#[cfg(not(feature = "ocr-full"))]
 pub use basic::OcrsEngine;
 pub use engine::{OcrConfig, OcrEngine};
 pub use preprocess::{
@@ -30,33 +35,6 @@ pub use tesseract::TextExtractor;
 
 #[cfg(not(feature = "ocr-full"))]
 pub use self::ocrs_extractor::TextExtractor;
-
-/// Create an OCR engine for quantities (digits).
-pub fn create_quantity_engine(data_path: &str) -> Option<Box<dyn OcrEngine>> {
-    let config = OcrConfig::for_quantities(data_path);
-    match OcrsEngine::new(config) {
-        Ok(engine) if engine.is_available() => Some(Box::new(engine)),
-        _ => None,
-    }
-}
-
-/// Create an OCR engine for single-line text.
-pub fn create_text_engine(data_path: &str, _model: &str) -> Option<Box<dyn OcrEngine>> {
-    let config = OcrConfig::for_text_line(data_path, "eng");
-    match OcrsEngine::new(config) {
-        Ok(engine) if engine.is_available() => Some(Box::new(engine)),
-        _ => None,
-    }
-}
-
-/// Create an OCR engine for multi-line text blocks.
-pub fn create_block_engine(data_path: &str, _model: &str) -> Option<Box<dyn OcrEngine>> {
-    let config = OcrConfig::for_text_block(data_path, "eng");
-    match OcrsEngine::new(config) {
-        Ok(engine) if engine.is_available() => Some(Box::new(engine)),
-        _ => None,
-    }
-}
 
 /// Ocrs-based TextExtractor wrapper (used when ocr-full is not enabled).
 #[cfg(not(feature = "ocr-full"))]

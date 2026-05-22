@@ -20,7 +20,7 @@ use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
 use crate::image_utils;
 use crate::models::{ItemCandidate, Stockpile, StockpileItem, Timing};
-use crate::ocr::{digit_matcher, preprocess, OcrEngine, TextExtractor};
+use crate::ocr::{digit_matcher, preprocess, TextExtractor};
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, TemplateMatcher};
 use crate::template::phash::compute_phash;
@@ -35,8 +35,10 @@ pub struct ScanPipeline {
     config: ScanConfig,
     /// Loaded template database (cached).
     database: Option<Arc<TemplateDatabase>>,
-    /// Internal OCR engine for shard/timestamp (always ocrs, Latin-only is fine).
-    shard_extractor: Option<crate::ocr::OcrsEngine>,
+    /// Text extractor for shard/timestamp. Multilingual under ocr-full
+    /// (the in-game timestamp line includes CJK/Cyrillic on those clients),
+    /// otherwise ocrs (Latin-only).
+    shard_extractor: Option<TextExtractor>,
     /// Text extractor for type/name (Tesseract if ocr-full, otherwise ocrs).
     text_extractor: Option<TextExtractor>,
 }
@@ -67,21 +69,20 @@ impl ScanPipeline {
             self.database = Some(Arc::new(db));
         }
 
-        // Initialize shard extractor (always use internal ocrs - Latin only is fine)
-        // Shard names are: "ABLE", "CHARLIE", "Devbranch"
-        // Timestamp is just numbers: [0-9]+,[0-9]{4}
+        // Initialize shard extractor.
+        // Shard names are Latin ("ABLE", "CHARLIE", "Devbranch"), but the
+        // in-game timestamp line on CJK/Cyrillic clients embeds non-Latin
+        // characters (e.g. "Day"/"Hours" localized), so use the multilingual
+        // Tesseract extractor when available (ocr-full) and fall back to eng.
         if self.shard_extractor.is_none() {
-            let config = crate::ocr::OcrConfig::for_text_line(&self.data_path, "eng");
-            match crate::ocr::OcrsEngine::new(config) {
-                Ok(engine) if engine.is_available() => {
-                    self.shard_extractor = Some(engine);
-                }
-                Ok(_) => {
-                    eprintln!("Warning: ocrs model not available for shard extraction");
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to initialize shard OCR: {}", e);
-                }
+            match TextExtractor::new_for_text_default("eng+chi_sim+rus") {
+                Ok(extractor) => self.shard_extractor = Some(extractor),
+                Err(_) => match TextExtractor::new_for_text_default("eng") {
+                    Ok(extractor) => self.shard_extractor = Some(extractor),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to initialize shard OCR: {}", e);
+                    }
+                },
             }
         }
 
@@ -310,7 +311,7 @@ impl ScanPipeline {
             }
         }
 
-        // Extract shard and ingame timestamp (always use internal ocrs - Latin only)
+        // Extract shard and ingame timestamp.
         // Region contains 2 lines: timestamp on top, shard name on bottom
         // Split the region in half vertically and process each separately
         if let Some((x, y, w, h)) = regions.shard_region {
@@ -331,7 +332,7 @@ impl ScanPipeline {
                 let (processed, proc_w, proc_h) =
                     preprocess_for_shard(&timestamp_img, w as usize, half_h as usize);
 
-                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32) {
+                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
                     let timestamp = extract_day_and_hour(&text);
                     if !timestamp.is_empty() {
                         stockpile.ingame_timestamp = Some(timestamp);
@@ -353,7 +354,7 @@ impl ScanPipeline {
                 let (processed, proc_w, proc_h) =
                     preprocess_for_shard(&shard_img, w as usize, half_h as usize);
 
-                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32) {
+                if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
                     let text_upper = text.to_uppercase();
                     if text_upper.contains("ABLE") {
                         stockpile.shard = Some("ABLE".to_string());
@@ -1088,6 +1089,20 @@ mod tests {
         // Check that the red pixel is captured
         let region_center = (1 * 3 + 1) * 3;
         assert_eq!(region[region_center], 255);
+    }
+
+    #[test]
+    fn extracts_day_and_hour_from_plain_text() {
+        assert_eq!(extract_day_and_hour("Day 1234, 2056 Hours"), "1234, 20:56");
+        assert_eq!(extract_day_and_hour("Day 702, 0304 Hours"), "702, 03:04");
+    }
+
+    #[test]
+    fn extracts_day_and_hour_from_cjk_and_cyrillic_text() {
+        // CJK/Cyrillic clients surround the digits with non-Latin characters.
+        // Only ASCII digits/commas are kept, so the result must still be clean.
+        assert_eq!(extract_day_and_hour("第 702 天, 0304 小时"), "702, 03:04");
+        assert_eq!(extract_day_and_hour("День 702, 0304 часов"), "702, 03:04");
     }
 
     #[test]
