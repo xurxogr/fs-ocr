@@ -12,7 +12,22 @@ Fast OCR library for Foxhole stockpile screenshots, written in Rust with Python 
 
 ## Installation
 
-### From PyPI (when published)
+### Standalone CLI (no Python required)
+
+Prebuilt `fs-ocr` binaries are attached to each [GitHub Release](../../releases)
+for Linux, Windows, and macOS (x86_64 + Apple Silicon). Download, extract, run:
+
+```bash
+tar -xzf fs-ocr-linux-x86_64.tar.gz   # or unzip the .zip on Windows
+./fs-ocr scan screenshot.png -d templates.h5 --faction wardens
+```
+
+Two builds are published per platform:
+
+- `fs-ocr-<os>-<arch>` — pure-Rust OCR, no system dependencies
+- `fs-ocr-tesseract-<os>-<arch>` — Tesseract backend (requires system Tesseract)
+
+### From PyPI
 
 Two distributions are published from this codebase; install exactly one:
 
@@ -254,4 +269,4 @@ src/
 
 ## License
 
-MIT
+[MIT](LICENSE)
