@@ -60,6 +60,17 @@ jobs:
           manylinux: "2_28"
           before-script-linux: dnf install -y cmake gcc gcc-c++ make
 
+      # Install the freshly built wheel and import it to catch broken builds
+      # (missing symbols, bad abi3 tag, embedded model failures) before release.
+      # Scoped to the normal package only: the tesseract package's runtime libs
+      # live inside the manylinux container, not on the host runner.
+      - name: Smoke test wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --find-links dist --no-index fs-ocr
+          python -c "import fs_ocr; print('version', fs_ocr.__version__); print('backend', fs_ocr.OCR_BACKEND)"
+
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-normal-${{ matrix.platform.os }}-${{ matrix.platform.target }}

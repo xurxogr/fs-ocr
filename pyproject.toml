@@ -8,18 +8,24 @@ dynamic = ["version"]
 description = "Fast OCR library for Foxhole stockpile screenshots"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
 ]
 keywords = ["ocr", "foxhole", "game", "stockpile", "template-matching"]
+
+[project.urls]
+Homepage = "https://github.com/xurxogr/fs-ocr"
+Repository = "https://github.com/xurxogr/fs-ocr"
+Issues = "https://github.com/xurxogr/fs-ocr/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "numpy"]
@@ -28,7 +34,3 @@ dev = ["pytest", "numpy"]
 features = ["python", "pyo3/extension-module"]
 python-source = "python"
 module-name = "fs_ocr._fs_ocr"
-include = [
-    { path = "data/*.rten", format = "sdist" },
-    { path = "data/*.rten", format = "wheel" },
-]

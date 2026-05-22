@@ -16,9 +16,15 @@ use crate::error::{FsOcrError, Result};
 
 use super::engine::{OcrConfig, OcrEngine};
 
-/// Path to the recognition model (relative to data directory).
+/// Filename of an optional user-supplied recognition model in the data
+/// directory. When present it overrides the embedded model below.
 /// Note: We don't use detection model - we already know where text is.
 const RECOGNITION_MODEL: &str = "text-recognition.rten";
+
+/// Recognition model compiled into the binary so the library and CLI work with
+/// no external data files. A file at `<data_path>/text-recognition.rten` takes
+/// precedence, letting users swap in a better model without recompiling.
+static EMBEDDED_RECOGNITION_MODEL: &[u8] = include_bytes!("../../data/text-recognition.rten");
 
 /// Ocrs-based OCR engine implementing the OcrEngine trait.
 pub struct OcrsEngine {
@@ -46,11 +52,7 @@ impl OcrsEngine {
         let (engine, available) = Self::try_load_engine(&config.data_path);
 
         if !available {
-            eprintln!(
-                "Warning: ocrs model not found in '{}'. Basic OCR will return empty results.",
-                config.data_path
-            );
-            eprintln!("Expected model: {}", RECOGNITION_MODEL);
+            eprintln!("Warning: failed to load the ocrs recognition model. Basic OCR will return empty results.");
         }
 
         Ok(Self {
@@ -60,23 +62,29 @@ impl OcrsEngine {
         })
     }
 
-    /// Try to load the ocrs engine from the data path.
-    /// Only loads recognition model (no detection) for faster processing.
+    /// Try to load the ocrs engine.
+    /// Prefers a user-supplied model file in the data path, falling back to the
+    /// embedded model. Only loads recognition (no detection) for speed.
     fn try_load_engine(data_path: &str) -> (Option<OcrsOcrEngine>, bool) {
-        let base_path = std::path::Path::new(data_path);
-        let recognition_path = base_path.join(RECOGNITION_MODEL);
+        let recognition_path = std::path::Path::new(data_path).join(RECOGNITION_MODEL);
 
-        // Check if recognition model exists
-        if !recognition_path.exists() {
-            return (None, false);
-        }
-
-        // Load recognition model only (no detection - we know where text is)
-        let recognition_model = match Model::load_file(&recognition_path) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("Failed to load recognition model: {:?}", e);
-                return (None, false);
+        // A model file in the data dir overrides the embedded one; otherwise
+        // fall back to the model compiled into the binary.
+        let recognition_model = if recognition_path.exists() {
+            match Model::load_file(&recognition_path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Failed to load recognition model: {:?}", e);
+                    return (None, false);
+                }
+            }
+        } else {
+            match Model::load_static_slice(EMBEDDED_RECOGNITION_MODEL) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Failed to load embedded recognition model: {:?}", e);
+                    return (None, false);
+                }
             }
         };
 
@@ -203,16 +211,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ocrs_engine_unavailable() {
+    fn test_ocrs_engine_uses_embedded_model_fallback() {
+        // With no model file in the data path, the engine falls back to the
+        // model embedded in the binary, so it is still available.
         let config = OcrConfig::for_quantities("nonexistent_path");
         let engine = OcrsEngine::new(config).unwrap();
-        assert!(!engine.is_available());
+        assert!(engine.is_available());
         assert!(!engine.supports_multilingual());
         assert_eq!(engine.engine_name(), "ocrs");
     }
 
     #[test]
-    fn test_extract_text_when_unavailable() {
+    fn test_extract_text_blank_returns_empty() {
         let config = OcrConfig::for_quantities("nonexistent_path");
         let engine = OcrsEngine::new(config).unwrap();
         let result = engine.extract_text(&[128; 100], 10, 10).unwrap();
