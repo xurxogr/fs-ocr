@@ -7,7 +7,7 @@ Fast OCR library for Foxhole stockpile screenshots, written in Rust with Python 
 - **Fast Template Matching**: pHash filtering + NCC scoring with adaptive candidate escalation
 - **ROI + Grey Mask Detection**: black-box ROI localization followed by grey-mask box detection
 - **Quantity Recognition**: template-based glyph matching (no OCR engine needed for digits)
-- **Pure-Rust OCR by default**: `ocrs`/`rten` for text; optional Tesseract backend
+- **Pure-Rust OCR by default**: `ocrs`/`rten` for Latin text; optional Tesseract backend for Chinese/Russian (see [Chinese / Russian support](#chinese--russian-non-latin-support))
 - **Python API + CLI**: PyO3 bindings (`import fs_ocr`) and an `fs-ocr` command-line tool
 
 ## Installation
@@ -47,6 +47,42 @@ Both import as `import fs_ocr`.
 > pip uninstall -y fs-ocr fs-ocr-tesseract
 > pip install fs-ocr           # or fs-ocr-tesseract
 > ```
+
+### Chinese / Russian (non-Latin) support
+
+The default pure-Rust backend (`ocrs`) only recognizes **Latin** text. Screenshots
+from the Chinese or Russian game clients need the Tesseract backend, which reads
+those scripts. There is **no language flag** — you just install the right package
+plus the matching language data, and scanning picks it up automatically (it loads
+`eng+chi_sim+rus` when available and falls back to `eng`).
+
+1. **Install the Tesseract distribution** instead of the default:
+
+   ```bash
+   pip install fs-ocr-tesseract
+   ```
+
+2. **Install system Tesseract + the language data.** The engine and traineddata
+   are *not* bundled — they come from your OS package manager, which also keeps
+   them patched for security. Tesseract finds them via the system `tessdata`
+   directory (or `TESSDATA_PREFIX`):
+
+   | OS | Command (engine + Simplified Chinese + Russian) |
+   |----|--------------------------------------------------|
+   | Debian/Ubuntu | `sudo apt install tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-rus` |
+   | Fedora/RHEL | `sudo dnf install tesseract tesseract-langpack-chi_sim tesseract-langpack-rus` |
+   | macOS (Homebrew) | `brew install tesseract tesseract-lang` (installs all languages) |
+   | Windows | [UB Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki) — select Chinese/Russian during setup — or `choco install tesseract` |
+
+   For Traditional Chinese, add `chi_tra` (e.g. `tesseract-ocr-chi-tra`).
+
+3. **Scan as usual** — no code change. If a language is missing, recognition
+   silently falls back to `eng`; install the package above to enable it.
+
+> Prefer the smallest traineddata? You can drop `chi_sim.traineddata` /
+> `rus.traineddata` from [`tessdata_fast`](https://github.com/tesseract-ocr/tessdata_fast)
+> into your `tessdata` directory and point `TESSDATA_PREFIX` at it instead of
+> using the OS packages.
 
 ### From Source
 
