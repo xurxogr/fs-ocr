@@ -1,4 +1,4 @@
-<!-- Generated: 2026-03-21 | Files scanned: 24 | Token estimate: ~300 -->
+<!-- Generated: 2026-05-21 | Files scanned: 31 | Token estimate: ~400 -->
 
 # fs-ocr Dependencies
 
@@ -6,17 +6,20 @@
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| pyo3 | 0.22 | Python bindings (extension-module) |
-| numpy | 0.22 | NumPy array interop |
+| pyo3 | 0.24 | Python bindings (extension-module) |
+| numpy | 0.24 | NumPy array interop |
 | ndarray | 0.16 | N-dimensional arrays |
-| serde | 1.0 | Serialization traits |
-| serde_json | 1.0 | JSON serialization |
+| serde / serde_json | 1.0 | Serialization + JSON output |
 | thiserror | 2.0 | Error derive macros |
-| rayon | 1.10 | Data parallelism |
+| rayon | 1.10 | Parallel NCC matching |
 | chrono | 0.4 | Timestamps (serde feature) |
-| image | 0.25 | Image file loading |
-| hdf5 | 0.8 | HDF5 template database |
-| leptess | 0.14 | Tesseract OCR bindings |
+| image | 0.25 | Image file / stdin decoding |
+| clap | 4 | CLI argument parsing (derive) |
+| base64 | 0.22 | Encoding helpers |
+| hdf5 / hdf5-sys | 0.8 | HDF5 template database |
+| ocrs | 0.11 | Pure-Rust OCR engine |
+| rten / rten-imageproc | 0.22 | ML runtime + image ops for ocrs |
+| leptess | 0.14 | Tesseract bindings (optional, `ocr-full`) |
 
 ## Dev Dependencies
 
@@ -24,22 +27,30 @@
 |-------|---------|---------|
 | tempfile | 3.14 | Temporary files in tests |
 
+## Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `ocr-full` | off | Enable Tesseract backend via `leptess` (needs system Tesseract) |
+| `static-hdf5` | off | Build/statically link libhdf5 + zlib from source (CI wheels) |
+
 ## Native Libraries (System)
 
 | Library | Required By | Notes |
 |---------|-------------|-------|
-| libhdf5 | hdf5 crate | `apt install libhdf5-dev` |
-| leptonica | leptess | Image processing for Tesseract |
-| tesseract | leptess | OCR engine (v4+) |
+| libhdf5 | hdf5 crate | `apt install libhdf5-dev` (or `static-hdf5` to bundle) |
+| CMake + C/C++ | `static-hdf5` | Build-time only |
+| tesseract + leptonica | `ocr-full` | Only when Tesseract backend enabled |
 
-## Python Environment
+Default build needs **no external OCR engine** — ocrs is pure Rust.
 
-```bash
-# Install Rust library as Python module
-maturin develop --release
+## OCR Model Files (data/)
 
-# Or build wheel
-maturin build --release
+```
+data/
+├── text-detection.rten      # ocrs detection model
+├── text-recognition.onnx    # ocrs recognition model
+└── renner_numbers.traineddata  # (Tesseract digit model, ocr-full path)
 ```
 
 ## Dependency Graph (simplified)
@@ -47,26 +58,28 @@ maturin build --release
 ```
 fs_ocr
 ├── pyo3 + numpy → Python interface
-├── hdf5 → Template loading
-│   └── libhdf5 (native)
-├── leptess → OCR
+├── clap → CLI binary
+├── hdf5 → template loading
+│   └── libhdf5 (native, or static-hdf5)
+├── ocrs + rten → pure-Rust OCR (default)
+├── leptess → Tesseract OCR (optional)
 │   └── tesseract + leptonica (native)
-├── rayon → Parallel matching
-├── image → File loading
+├── rayon → parallel matching
+├── image → file/stdin decoding
 └── serde_json → JSON output
 ```
 
-## Feature Flags
+## Build
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `full` | off | Reserved for future native deps |
+```bash
+# Python module (default, ocrs backend)
+maturin develop --release
 
-## Build Profile
+# With Tesseract backend
+maturin build --release --features ocr-full
 
-```toml
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
+# CLI binary
+cargo build --release --bin fs-ocr
+
+# Release profile: opt-level=3, lto=true, codegen-units=1
 ```

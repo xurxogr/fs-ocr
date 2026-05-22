@@ -1,0 +1,365 @@
+name: Build & publish wheels
+
+# Produces TWO PyPI distributions from this one codebase:
+#   * fs-ocr            -> default features (pure-Rust ocrs/rten backend)
+#   * fs-ocr-tesseract  -> --features ocr-full (system Tesseract via leptess)
+# Both import as `import fs_ocr`; a user installs exactly one of them.
+#
+# HDF5 is built from source and statically linked (feature `static-hdf5`) so the
+# wheels carry no external libhdf5. Tesseract/Leptonica are NOT bundled: the
+# fs-ocr-tesseract wheels expect the user to have Tesseract installed.
+#
+# Triggers: tag push `v*` (build + publish) and manual dispatch / workflow PRs
+# (build only, no publish).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+
+permissions:
+  contents: read
+
+# Friendly OS/arch names and archive extensions for the standalone CLI assets.
+env:
+  CLI_BIN: fs-ocr
+
+jobs:
+  # ===========================================================================
+  # NORMAL package: fs-ocr (pure-Rust OCR, static HDF5, zero system libs)
+  # ===========================================================================
+  build-normal:
+    name: normal · ${{ matrix.platform.os }}-${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  target: x86_64,  os: linux }
+          - { runner: windows-latest, target: x64,     os: windows }
+          - { runner: macos-13,       target: x86_64,  os: macos }
+          - { runner: macos-14,       target: aarch64, os: macos }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # CMake is preinstalled on the Windows/macOS runners; Linux installs it
+      # inside the manylinux container via before-script-linux below.
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist --features static-hdf5
+          sccache: "true"
+          # manylinux_2_28 (AlmaLinux 8) ships a modern toolchain that can build
+          # HDF5 from source. before-script-linux runs INSIDE that container.
+          manylinux: "2_28"
+          before-script-linux: dnf install -y cmake gcc gcc-c++ make
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-normal-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist/*.whl
+
+  sdist-normal:
+    name: normal · sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist-normal
+          path: dist/*.tar.gz
+
+  # ===========================================================================
+  # TESSERACT package: fs-ocr-tesseract (--features ocr-full)
+  # Tesseract/Leptonica are linked dynamically and left UNBUNDLED (user must
+  # have them installed). The PyPI distribution name is rewritten to
+  # `fs-ocr-tesseract`; the import name stays `fs_ocr`.
+  #
+  # NOTE: this job is the iteration-prone one. Linking system Tesseract on
+  # Windows (vcpkg) and macOS (homebrew) commonly needs a tweak or two on the
+  # first real CI run. The normal package above does not depend on any of this.
+  # ===========================================================================
+  build-tesseract:
+    name: tesseract · ${{ matrix.platform.os }}-${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  target: x86_64,  os: linux }
+          - { runner: windows-latest, target: x64,     os: windows }
+          - { runner: macos-13,       target: x86_64,  os: macos }
+          - { runner: macos-14,       target: aarch64, os: macos }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Rewrite the distribution name (portable across GNU/BSD sed via -i.bak).
+      - name: Rename distribution to fs-ocr-tesseract
+        shell: bash
+        run: |
+          sed -i.bak 's/^name = "fs-ocr"/name = "fs-ocr-tesseract"/' pyproject.toml
+          rm -f pyproject.toml.bak
+          grep '^name = ' pyproject.toml
+
+      # ---- Windows: Tesseract + Leptonica via vcpkg -------------------------
+      - name: Install Tesseract (Windows / vcpkg)
+        if: matrix.platform.os == 'windows'
+        shell: bash
+        run: |
+          vcpkg install leptonica:x64-windows tesseract:x64-windows
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+          echo "VCPKGRS_DYNAMIC=1" >> "$GITHUB_ENV"
+
+      # ---- macOS: Tesseract + Leptonica via Homebrew ------------------------
+      - name: Install Tesseract (macOS / brew)
+        if: matrix.platform.os == 'macos'
+        shell: bash
+        run: |
+          brew install tesseract leptonica pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release --out dist
+            --features static-hdf5,ocr-full
+            ${{ matrix.platform.os == 'linux' && '--auditwheel skip' || '' }}
+          sccache: "true"
+          manylinux: "2_28"
+          # Linux: build deps + Tesseract/Leptonica dev libs inside the container.
+          # PowerTools/CRB + EPEL provide the -devel packages on AlmaLinux 8.
+          before-script-linux: |
+            dnf install -y dnf-plugins-core epel-release
+            dnf config-manager --set-enabled powertools || dnf config-manager --set-enabled crb || true
+            dnf install -y cmake gcc gcc-c++ make tesseract-devel leptonica-devel
+
+      # Linux only: we skipped maturin's repair (it would bundle Tesseract).
+      # Re-tag to manylinux while explicitly EXCLUDING the system OCR libs so the
+      # wheel stays "bring your own Tesseract" yet PyPI-acceptable.
+      - name: Repair Linux wheel (exclude system Tesseract/Leptonica)
+        if: matrix.platform.os == 'linux'
+        run: |
+          python -m pip install auditwheel patchelf
+          mkdir -p repaired
+          for whl in dist/*.whl; do
+            auditwheel repair "$whl" \
+              --plat manylinux_2_28_x86_64 \
+              --exclude libtesseract.so.5 \
+              --exclude liblept.so.5 \
+              -w repaired/
+          done
+          rm -f dist/*.whl
+          mv repaired/*.whl dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-tesseract-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist/*.whl
+
+  sdist-tesseract:
+    name: tesseract · sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rename distribution to fs-ocr-tesseract
+        shell: bash
+        run: |
+          sed -i.bak 's/^name = "fs-ocr"/name = "fs-ocr-tesseract"/' pyproject.toml
+          rm -f pyproject.toml.bak
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist-tesseract
+          path: dist/*.tar.gz
+
+  # ===========================================================================
+  # STANDALONE CLI — `fs-ocr` executable, no Python/libpython linkage.
+  # Built with `--no-default-features` (drops the `python` feature) so the
+  # binary links no libpython and runs on a machine without Python installed.
+  # HDF5 is statically linked (`static-hdf5`). Two variants per OS/arch:
+  #   * cli-normal     -> pure-Rust ocrs/rten backend (zero system libs)
+  #   * cli-tesseract  -> --features ocr-full (dynamically linked Tesseract;
+  #                       the user must have Tesseract installed at runtime)
+  # Each build is archived (.tar.gz on unix, .zip on Windows) and uploaded as a
+  # build artifact; the `release-cli` job attaches them to the GitHub Release.
+  # ===========================================================================
+  build-cli-normal:
+    name: cli-normal · ${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  arch: x86_64,  os: linux,   target: x86_64-unknown-linux-gnu }
+          - { runner: windows-latest, arch: x86_64,  os: windows, target: x86_64-pc-windows-msvc }
+          - { runner: macos-13,       arch: x86_64,  os: macos,   target: x86_64-apple-darwin }
+          - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Build CLI (no python feature, static HDF5)
+        shell: bash
+        run: |
+          cargo build --release --locked \
+            --no-default-features --features static-hdf5 \
+            --bin "$CLI_BIN" --target ${{ matrix.platform.target }}
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          name="fs-ocr-${{ matrix.platform.os }}-${{ matrix.platform.arch }}"
+          src="target/${{ matrix.platform.target }}/release/$CLI_BIN"
+          if [ "${{ matrix.platform.os }}" = "windows" ]; then
+            7z a "$name.zip" "$src.exe"
+            echo "asset=$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -C "target/${{ matrix.platform.target }}/release" -czf "$name.tar.gz" "$CLI_BIN"
+            echo "asset=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-normal-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+          path: ${{ steps.pkg.outputs.asset }}
+
+  build-cli-tesseract:
+    name: cli-tesseract · ${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest,  arch: x86_64,  os: linux,   target: x86_64-unknown-linux-gnu }
+          - { runner: windows-latest, arch: x86_64,  os: windows, target: x86_64-pc-windows-msvc }
+          - { runner: macos-13,       arch: x86_64,  os: macos,   target: x86_64-apple-darwin }
+          - { runner: macos-14,       arch: aarch64, os: macos,   target: aarch64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Install Tesseract (Linux / apt)
+        if: matrix.platform.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libtesseract-dev libleptonica-dev clang
+
+      - name: Install Tesseract (Windows / vcpkg)
+        if: matrix.platform.os == 'windows'
+        shell: bash
+        run: |
+          vcpkg install leptonica:x64-windows tesseract:x64-windows
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+          echo "VCPKGRS_DYNAMIC=1" >> "$GITHUB_ENV"
+
+      - name: Install Tesseract (macOS / brew)
+        if: matrix.platform.os == 'macos'
+        shell: bash
+        run: |
+          brew install tesseract leptonica pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Build CLI (tesseract backend, no python feature, static HDF5)
+        shell: bash
+        run: |
+          cargo build --release --locked \
+            --no-default-features --features static-hdf5,ocr-full \
+            --bin "$CLI_BIN" --target ${{ matrix.platform.target }}
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          name="fs-ocr-tesseract-${{ matrix.platform.os }}-${{ matrix.platform.arch }}"
+          src="target/${{ matrix.platform.target }}/release/$CLI_BIN"
+          if [ "${{ matrix.platform.os }}" = "windows" ]; then
+            7z a "$name.zip" "$src.exe"
+            echo "asset=$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -C "target/${{ matrix.platform.target }}/release" -czf "$name.tar.gz" "$CLI_BIN"
+            echo "asset=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-tesseract-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+          path: ${{ steps.pkg.outputs.asset }}
+
+  # Attach every standalone CLI archive to the GitHub Release (tag pushes only).
+  release-cli:
+    name: release · attach CLI binaries
+    needs: [build-cli-normal, build-cli-tesseract]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "cli-*"
+          path: cli
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: cli/*
+
+  # ===========================================================================
+  # PUBLISH (tag pushes only) — trusted publishing via OIDC, no stored tokens.
+  # Each PyPI project must list this repo+workflow as a trusted publisher:
+  #   fs-ocr            -> environment `pypi-normal`
+  #   fs-ocr-tesseract  -> environment `pypi-tesseract`
+  # ===========================================================================
+  publish-normal:
+    name: publish · fs-ocr
+    needs: [build-normal, sdist-normal]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi-normal
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheels-normal-*,sdist-normal}"
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-tesseract:
+    name: publish · fs-ocr-tesseract
+    needs: [build-tesseract, sdist-tesseract]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi-tesseract
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheels-tesseract-*,sdist-tesseract}"
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

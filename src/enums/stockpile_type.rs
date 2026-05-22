@@ -1,11 +1,12 @@
 //! Stockpile type enumeration.
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Stockpile type indicating the kind of storage structure.
-#[pyclass(eq, eq_int)]
+#[cfg_attr(feature = "python", pyclass(eq, eq_int))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum StockpileType {
     // Bases (order from the game)
@@ -41,7 +42,6 @@ pub enum StockpileType {
     Undefined = 12,
 }
 
-#[pymethods]
 impl StockpileType {
     /// Check if this stockpile type supports custom player-given names.
     ///
@@ -74,9 +74,28 @@ impl StockpileType {
     }
 
     /// Parse from a string value (supports multiple languages).
-    #[staticmethod]
     pub fn from_string(value: &str) -> Self {
         Self::classify_from_text(value)
+    }
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl StockpileType {
+    #[pyo3(name = "has_custom_name")]
+    fn py_has_custom_name(&self) -> bool {
+        self.has_custom_name()
+    }
+
+    #[pyo3(name = "display_name")]
+    fn py_display_name(&self) -> &'static str {
+        self.display_name()
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "from_string")]
+    fn py_from_string(value: &str) -> Self {
+        Self::from_string(value)
     }
 
     fn __repr__(&self) -> String {

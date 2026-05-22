@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Fast OCR library for Foxhole stockpile screenshots"
 license = "MIT"
-authors = ["Foxhole Stockpiles Contributors"]
+authors = ["Jorge García"]
 
 [lib]
 name = "fs_ocr"
@@ -15,14 +15,23 @@ name = "fs-ocr"
 path = "src/bin/fs-ocr.rs"
 
 [features]
-default = []
+default = ["python"]
+# Python bindings via PyO3. Enabled by default (and by maturin) for the wheel
+# builds. Disable it (`--no-default-features`) to build the standalone `fs-ocr`
+# CLI with zero Python/libpython dependency on every platform.
+python = ["dep:pyo3", "dep:numpy"]
 # Full OCR with Tesseract (requires system Tesseract installation)
 # Build with: maturin build --release --features ocr-full
 ocr-full = ["dep:leptess"]
+# Build (and statically link) HDF5 from source instead of using a system
+# libhdf5. Enabled in CI wheel builds so published wheels carry no external
+# libhdf5 dependency. Local dev builds keep using the system library (faster).
+# Requires CMake + a C/C++ compiler at build time.
+static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib"]
 
 [dependencies]
-pyo3 = "0.24"
-numpy = "0.24"
+pyo3 = { version = "0.24", optional = true }
+numpy = { version = "0.24", optional = true }
 ndarray = "0.16"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -35,6 +44,9 @@ clap = { version = "4", features = ["derive"] }
 
 # Native libraries
 hdf5 = "0.8"
+# Direct handle on hdf5-sys so the `static-hdf5` feature can build libhdf5 (+ its
+# zlib filter) from source. Unifies with the hdf5 crate's own hdf5-sys dep.
+hdf5-sys = "0.8"
 
 # Pure Rust OCR (ocrs) - always included
 ocrs = "0.11"

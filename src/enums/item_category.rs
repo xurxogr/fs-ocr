@@ -1,11 +1,12 @@
 //! Item category enumeration.
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Item category classification.
-#[pyclass(eq, eq_int)]
+#[cfg_attr(feature = "python", pyclass(eq, eq_int))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ItemCategory {
     /// Regular items (supplies, ammo, etc.).
@@ -19,7 +20,6 @@ pub enum ItemCategory {
     Invalid = 3,
 }
 
-#[pymethods]
 impl ItemCategory {
     /// Get the display value for this category.
     pub fn value(&self) -> &'static str {
@@ -32,7 +32,6 @@ impl ItemCategory {
     }
 
     /// Parse from a string value.
-    #[staticmethod]
     pub fn from_string(value: &str) -> Self {
         let normalized = value.trim().to_lowercase();
         match normalized.as_str() {
@@ -41,6 +40,21 @@ impl ItemCategory {
             "shippable" => ItemCategory::Shippable,
             _ => ItemCategory::Invalid,
         }
+    }
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ItemCategory {
+    #[pyo3(name = "value")]
+    fn py_value(&self) -> &'static str {
+        self.value()
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "from_string")]
+    fn py_from_string(value: &str) -> Self {
+        Self::from_string(value)
     }
 
     fn __repr__(&self) -> String {

@@ -1,11 +1,12 @@
 //! Item faction enumeration.
 
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Faction variants for items.
-#[pyclass(eq, eq_int)]
+#[cfg_attr(feature = "python", pyclass(eq, eq_int))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ItemFaction {
     /// Neutral items available to both factions.
@@ -17,7 +18,6 @@ pub enum ItemFaction {
     Wardens = 2,
 }
 
-#[pymethods]
 impl ItemFaction {
     /// Convert a string to a Faction, never returns None.
     ///
@@ -26,8 +26,6 @@ impl ItemFaction {
     ///
     /// Returns:
     ///     The corresponding Faction, defaults to NEUTRAL for invalid/empty input.
-    #[staticmethod]
-    #[pyo3(signature = (value=None))]
     pub fn from_string(value: Option<&str>) -> Self {
         match value {
             None => ItemFaction::Neutral,
@@ -49,6 +47,21 @@ impl ItemFaction {
             ItemFaction::Colonials => "Colonials",
             ItemFaction::Wardens => "Wardens",
         }
+    }
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl ItemFaction {
+    #[staticmethod]
+    #[pyo3(name = "from_string", signature = (value=None))]
+    fn py_from_string(value: Option<&str>) -> Self {
+        Self::from_string(value)
+    }
+
+    #[pyo3(name = "value")]
+    fn py_value(&self) -> &'static str {
+        self.value()
     }
 
     fn __repr__(&self) -> String {

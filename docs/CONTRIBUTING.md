@@ -4,16 +4,20 @@
 
 ### Prerequisites
 
-- Rust toolchain (1.70+)
+- Rust toolchain (edition 2021)
 - Python 3.10+
-- System libraries (Ubuntu/Debian):
+- Build tools (Ubuntu/Debian) — HDF5 is built from source via `static-hdf5`:
 
 ```bash
-sudo apt-get install \
-    libhdf5-dev \
-    libtesseract-dev \
-    libleptonica-dev \
-    libclang-dev
+sudo apt-get install cmake gcc g++ libclang-dev
+```
+
+The default backend uses pure-Rust OCR (`ocrs`/`rten`) and needs **no**
+Tesseract, Leptonica, or OpenCV. Those are only required for the optional
+`ocr-full` (Tesseract) backend:
+
+```bash
+sudo apt-get install libtesseract-dev libleptonica-dev
 ```
 
 ### Install for Development
@@ -26,8 +30,11 @@ cd fs-ocr
 # Install Python dev dependencies
 pip install maturin pytest numpy
 
-# Build and install the Python module
-maturin develop
+# Build and install the Python module (default, pure-Rust OCR)
+maturin develop --release
+
+# Or with the Tesseract backend
+maturin develop --release --features ocr-full
 ```
 
 ## Available Commands
@@ -35,14 +42,23 @@ maturin develop
 <!-- AUTO-GENERATED from Cargo.toml -->
 | Command | Description |
 |---------|-------------|
-| `cargo test` | Run all 46 unit tests |
-| `cargo clippy` | Run Clippy linter |
+| `cargo test` | Run the unit test suite |
+| `cargo clippy -- -D warnings` | Run Clippy linter (warnings as errors) |
 | `cargo fmt` | Format code with rustfmt |
 | `cargo build` | Build debug version |
 | `cargo build --release` | Build optimized release |
-| `maturin develop` | Build + install Python module |
+| `cargo build --release --bin fs-ocr` | Build the CLI binary |
+| `maturin develop --release` | Build + install Python module |
 | `maturin build --release` | Build distributable wheel |
+| `maturin build --release --features ocr-full` | Wheel with Tesseract backend |
 <!-- END AUTO-GENERATED -->
+
+## Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `ocr-full` | off | Tesseract backend via `leptess` (needs system Tesseract) |
+| `static-hdf5` | off | Build/statically link libhdf5 from source (used by CI wheels) |
 
 ## Testing
 
@@ -71,6 +87,17 @@ cargo test -- --nocapture
 - **Linter**: `cargo clippy -- -D warnings` (treat warnings as errors)
 - **Max line width**: 100 characters (rustfmt default)
 - **Naming**: `snake_case` for functions, `PascalCase` for types
+
+### Pre-commit Hooks
+
+Formatting is enforced via pre-commit (`cargo fmt` for Rust, `ruff format` for
+Python). If a hook reformats a file the commit aborts so you can re-stage.
+Set up once per clone:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
 
 ## Pull Request Checklist
 

@@ -1,6 +1,8 @@
 //! Error types for the fs-ocr library.
 
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyException;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use thiserror::Error;
 
@@ -56,6 +58,7 @@ pub enum FsOcrError {
     Internal(String),
 }
 
+#[cfg(feature = "python")]
 impl From<FsOcrError> for PyErr {
     fn from(err: FsOcrError) -> PyErr {
         PyException::new_err(err.to_string())

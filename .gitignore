@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 
+# Local Cargo config (machine-specific CPU tuning; not for CI/consumers)
+.cargo/
+
 # Debug images
 *.png
 
@@ -12,6 +15,10 @@ __pycache__/
 .eggs/
 dist/
 build/
+
+# Compiled native extension built by `maturin develop` (platform-specific artifact)
+python/fs_ocr/*.so
+python/fs_ocr/*.pyd
 
 # IDE
 .idea/

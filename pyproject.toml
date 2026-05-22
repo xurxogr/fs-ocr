@@ -25,11 +25,10 @@ keywords = ["ocr", "foxhole", "game", "stockpile", "template-matching"]
 dev = ["pytest", "numpy"]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
-module-name = "fs_ocr"
+features = ["python", "pyo3/extension-module"]
+python-source = "python"
+module-name = "fs_ocr._fs_ocr"
 include = [
-    { path = "tessdata/*.traineddata", format = "sdist" },
-    { path = "tessdata/*.traineddata", format = "wheel" },
-    { path = "tessdata/*.rten", format = "sdist" },
-    { path = "tessdata/*.rten", format = "wheel" },
+    { path = "data/*.rten", format = "sdist" },
+    { path = "data/*.rten", format = "wheel" },
 ]

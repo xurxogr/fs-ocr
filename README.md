@@ -4,30 +4,52 @@ Fast OCR library for Foxhole stockpile screenshots, written in Rust with Python 
 
 ## Features
 
-- **Fast Template Matching**: Two-phase matching using pHash filtering and NCC scoring
-- **Grey Mask Detection**: HSV+RGB dual-mask approach for robust grey box detection
-- **Quantity OCR**: Custom Tesseract model for game-specific number recognition
-- **Python API**: Easy-to-use Python bindings via PyO3
+- **Fast Template Matching**: pHash filtering + NCC scoring with adaptive candidate escalation
+- **ROI + Grey Mask Detection**: black-box ROI localization followed by grey-mask box detection
+- **Quantity Recognition**: template-based glyph matching (no OCR engine needed for digits)
+- **Pure-Rust OCR by default**: `ocrs`/`rten` for text; optional Tesseract backend
+- **Python API + CLI**: PyO3 bindings (`import fs_ocr`) and an `fs-ocr` command-line tool
 
 ## Installation
 
 ### From PyPI (when published)
 
+Two distributions are published from this codebase; install exactly one:
+
 ```bash
-pip install fs-ocr
+pip install fs-ocr            # pure-Rust OCR backend, zero system OCR libs
+pip install fs-ocr-tesseract  # Tesseract backend (requires system Tesseract)
 ```
+
+Both import as `import fs_ocr`.
+
+> **Install exactly one.** The two distributions ship the same `fs_ocr`
+> module and cannot coexist. pip will not stop you from installing both, so
+> `import fs_ocr` raises a clear error if it detects both. To switch backends,
+> uninstall first:
+>
+> ```bash
+> pip uninstall -y fs-ocr fs-ocr-tesseract
+> pip install fs-ocr           # or fs-ocr-tesseract
+> ```
 
 ### From Source
 
-Requires Rust toolchain and system dependencies:
+The default build needs only a C/C++ toolchain (HDF5 is built from source via
+the `static-hdf5` feature). No OpenCV or Tesseract required for the default
+backend:
 
 ```bash
-# Install system dependencies (Ubuntu/Debian)
-sudo apt-get install libhdf5-dev libopencv-dev libtesseract-dev libleptonica-dev libclang-dev
+# Build deps (Ubuntu/Debian)
+sudo apt-get install cmake gcc g++ libclang-dev
 
-# Build and install
+# Build and install (default, pure-Rust OCR)
 pip install maturin
-maturin develop
+maturin develop --release
+
+# Optional: Tesseract backend (also needs system Tesseract/Leptonica)
+sudo apt-get install libtesseract-dev libleptonica-dev
+maturin develop --release --features ocr-full
 ```
 
 ## Python Usage
@@ -36,10 +58,10 @@ maturin develop
 from fs_ocr import StockpileScanner, ScanConfig
 import numpy as np
 
-# Create scanner with database path
-scanner = StockpileScanner(database_path="templates.h5")
+# Create scanner (data_path holds the OCR model files, default "data")
+scanner = StockpileScanner(database_path="templates.h5", data_path="data")
 
-# Scan from NumPy array (H x W x 3, uint8, RGB)
+# Scan from NumPy array (H x W x 3, uint8, BGR)
 image = np.array(...)  # Your image data
 result = scanner.scan(image, faction="wardens")
 print(result.to_json())
@@ -65,11 +87,11 @@ Main scanner class.
 ```python
 scanner = StockpileScanner(
     database_path: str,      # Path to HDF5 template database
-    tessdata_path: str = "tessdata"  # Path to Tesseract data directory
+    data_path: str = "data"  # Path to OCR model files directory
 )
 
 result = scanner.scan(
-    image: np.ndarray,       # RGB image (H x W x 3)
+    image: np.ndarray,       # BGR image (H x W x 3, uint8)
     faction: str = None,     # "wardens", "colonials", or None
     config: ScanConfig = None
 )
@@ -88,10 +110,12 @@ Configuration options for tuning the matching pipeline.
 
 ```python
 config = ScanConfig(
-    phash_threshold: int = 15,         # Max Hamming distance for pHash filter (lower=faster)
-    max_ncc_candidates: int = 50,      # Max templates to run NCC on after pHash filter
-    confidence_gap: float = 0.0,       # Return alternatives within this gap of best match
-    ncc_tiebreaker_threshold: float = 0.0015  # Edge-based tiebreaker for close matches
+    phash_threshold: int = 15,            # Max Hamming distance for pHash filter (lower=faster)
+    max_ncc_candidates: int = 100,        # Hard cap on NCC candidates (upper bound of escalation)
+    ncc_initial_candidates: int = 25,     # Initial NCC batch before adaptive escalation
+    ncc_escalation_threshold: float = 0.9,# Escalate candidate count if best confidence below this
+    confidence_gap: float = 0.0,          # Return alternatives within this gap of best match
+    ncc_tiebreaker_threshold: float = 0.003  # Edge(Sobel)-based tiebreaker; 0.0 disables
 )
 
 # Serialize/deserialize
@@ -105,14 +129,17 @@ ScanConfig.from_json(json_str) -> ScanConfig
 Scan result containing detected items.
 
 ```python
-stockpile.name           # Custom stockpile name (if applicable)
-stockpile.stockpile_type # StockpileType enum
-stockpile.items          # List[StockpileItem]
-stockpile.timestamp      # ISO 8601 timestamp
-stockpile.shard          # Game shard name
-stockpile.resolution     # Screenshot resolution
-stockpile.errors         # List of error messages
-stockpile.to_json()      # Serialize to JSON
+stockpile.name             # Custom stockpile name (if applicable)
+stockpile.type             # StockpileType enum
+stockpile.is_reserve       # True when named something other than "Public"
+stockpile.items            # List[StockpileItem]
+stockpile.timestamp        # ISO 8601 scan timestamp
+stockpile.shard            # Game shard name
+stockpile.ingame_timestamp # In-game time (e.g. "Day 1293, 1906 Hours")
+stockpile.resolution       # Screenshot resolution ("WxH")
+stockpile.errors           # List of error messages
+stockpile.timing           # Optional[Timing] per-stage metrics (None unless collected)
+stockpile.to_json()        # Serialize to JSON (to_json_compact() for one line)
 ```
 
 ### StockpileItem
@@ -127,6 +154,26 @@ item.confidence  # Match confidence (0.0 - 1.0)
 item.candidates  # Alternative matches (if confidence_gap > 0)
 ```
 
+## CLI Usage
+
+The crate also builds an `fs-ocr` binary that emits JSON.
+
+```bash
+# Scan a file
+fs-ocr scan screenshot.png -d templates.h5 --faction wardens
+
+# Read image from stdin ("-" or omit the path)
+cat screenshot.png | fs-ocr scan -d templates.h5 --compact
+
+# Print version
+fs-ocr version
+```
+
+Matching can be tuned with `--phash-threshold`, `--max-ncc-candidates`,
+`--ncc-initial-candidates`, `--ncc-escalation-threshold`, `--ncc-tiebreaker`,
+and `--confidence-gap`. Set `FS_OCR_TIMING=1` to include per-stage timing in the
+output. Exit codes: `0` ok, `1` runtime error, `2` bad input.
+
 ## Building the Template Database
 
 The template database is built from game assets. See the main foxhole-stockpiles repository for details on generating the HDF5 database.
@@ -138,17 +185,27 @@ The template database is built from game assets. See the main foxhole-stockpiles
 
 | Command | Description |
 |---------|-------------|
-| `cargo test` | Run Rust test suite (46 tests) |
-| `cargo clippy` | Run linter with warnings |
+| `cargo test` | Run the Rust test suite |
+| `cargo clippy -- -D warnings` | Run linter (warnings as errors) |
+| `cargo fmt` | Format code with rustfmt |
 | `cargo build --release` | Build optimized library |
-| `maturin develop` | Build and install Python module (dev) |
+| `cargo build --release --bin fs-ocr` | Build the CLI binary |
+| `maturin develop --release` | Build and install Python module (dev) |
 | `maturin build --release` | Build Python wheel for distribution |
+
+### Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `ocr-full` | off | Tesseract backend via `leptess` (needs system Tesseract) |
+| `static-hdf5` | off | Build/statically link libhdf5 from source (used by CI wheels) |
 
 ### Requirements
 
-- Rust 1.70+ (edition 2021)
+- Rust toolchain (edition 2021)
 - Python 3.10+ (for bindings)
-- System libraries: `libhdf5-dev`, `libtesseract-dev`, `libleptonica-dev`, `libclang-dev`
+- Build tools: `cmake`, `gcc`/`g++`, `libclang-dev`
+- Only for `ocr-full`: `libtesseract-dev`, `libleptonica-dev`
 
 ### Dev Dependencies
 
@@ -161,27 +218,35 @@ pip install pytest numpy  # Python dev deps
 
 ```
 src/
-├── lib.rs              # PyO3 module entry
-├── constants.rs        # Hardcoded values
+├── lib.rs              # PyO3 module + StockpileScanner
+├── bin/fs-ocr.rs       # CLI binary (clap)
+├── constants.rs        # Hardcoded values / resolution scaling
 ├── error.rs            # Error types
 ├── config.rs           # ScanConfig
+├── image_utils.rs      # RGB→grayscale, crop helpers
 ├── models/             # Output structs
 │   ├── stockpile.rs
-│   └── stockpile_item.rs
+│   ├── stockpile_item.rs
+│   └── timing.rs       # Per-stage Timing
 ├── enums/              # Type enums
 │   ├── stockpile_type.rs
 │   ├── item_faction.rs
 │   └── item_category.rs
-├── detector/           # Grey mask detection
+├── detector/           # ROI + grey mask detection
+│   ├── black_box.rs    # Dark ROI localization (first pass)
 │   ├── geometry.rs
 │   └── grey_mask.rs
 ├── template/           # Template matching
 │   ├── database.rs     # HDF5 loading
-│   ├── matching.rs     # NCC matching
+│   ├── matching.rs     # NCC + adaptive escalation + tiebreaker
 │   └── phash.rs        # Perceptual hashing
-├── ocr/                # Text extraction
-│   ├── tesseract.rs
-│   └── quantity.rs
+├── ocr/                # Text + quantity extraction
+│   ├── engine.rs       # OcrEngine trait + OcrConfig
+│   ├── basic.rs        # OcrsEngine (pure-Rust ocrs)
+│   ├── digit_matcher.rs# Glyph-template digit recognition (quantities)
+│   ├── preprocess.rs   # Grayscale/upscale/threshold
+│   ├── quantity.rs     # Quantity parsing + validation
+│   └── tesseract.rs    # Tesseract backend (feature: ocr-full)
 └── coordinator/        # Pipeline orchestration
     ├── pipeline.rs
     └── validation.rs

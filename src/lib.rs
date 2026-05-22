@@ -17,9 +17,12 @@
 //! result = scanner.scan(image, config=config)
 //! ```
 
+#[cfg(feature = "python")]
 use std::path::Path;
 
+#[cfg(feature = "python")]
 use numpy::{PyReadonlyArray3, PyUntypedArrayMethods};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 pub mod config;
@@ -33,19 +36,27 @@ pub mod models;
 pub mod ocr;
 pub mod template;
 
+#[cfg(feature = "python")]
 use config::ScanConfig;
+#[cfg(feature = "python")]
 use coordinator::ScanPipeline;
+#[cfg(feature = "python")]
 use detector::{BlackBoxDetector, GreyMaskDetector};
+#[cfg(feature = "python")]
 use enums::{ItemCategory, ItemFaction, StockpileType};
+#[cfg(feature = "python")]
 use models::{ItemCandidate, Stockpile, StockpileItem, Timing};
 
 /// Allowed extensions for database files.
+#[cfg(feature = "python")]
 const ALLOWED_DB_EXTENSIONS: &[&str] = &["h5", "hdf5"];
 
 /// Allowed extensions for image files.
+#[cfg(feature = "python")]
 const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "gif", "webp", "tiff"];
 
 /// Validate database path has allowed extension.
+#[cfg(feature = "python")]
 fn validate_database_path(path: &str) -> Result<(), String> {
     let path = Path::new(path);
 
@@ -67,6 +78,7 @@ fn validate_database_path(path: &str) -> Result<(), String> {
 }
 
 /// Validate image path has allowed extension.
+#[cfg(feature = "python")]
 fn validate_image_path(path: &str) -> Result<(), String> {
     let path = Path::new(path);
 
@@ -88,12 +100,14 @@ fn validate_image_path(path: &str) -> Result<(), String> {
 }
 
 /// Main stockpile scanner interface.
+#[cfg(feature = "python")]
 #[pyclass]
 pub struct StockpileScanner {
     /// Internal scan pipeline.
     pipeline: ScanPipeline,
 }
 
+#[cfg(feature = "python")]
 #[pymethods]
 impl StockpileScanner {
     /// Create a new stockpile scanner.
@@ -480,6 +494,7 @@ impl StockpileScanner {
 ///
 /// Returns:
 ///     64-bit perceptual hash as integer.
+#[cfg(feature = "python")]
 #[pyfunction]
 fn compute_phash(image: PyReadonlyArray3<u8>) -> PyResult<u64> {
     let shape = image.shape();
@@ -491,8 +506,13 @@ fn compute_phash(image: PyReadonlyArray3<u8>) -> PyResult<u64> {
 }
 
 /// Python module definition.
+///
+/// Built as the native sub-module `fs_ocr._fs_ocr`; the `fs_ocr` Python package
+/// (see `python/fs_ocr/__init__.py`) re-exports these symbols and guards against
+/// the `fs-ocr` / `fs-ocr-tesseract` distributions being installed together.
+#[cfg(feature = "python")]
 #[pymodule]
-fn fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Main scanner class
     m.add_class::<StockpileScanner>()?;
 
