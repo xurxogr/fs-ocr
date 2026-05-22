@@ -534,8 +534,8 @@ fn _fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compute_phash, m)?)?;
 
     // Module metadata
-    m.add("__version__", "0.1.0")?;
-    m.add("__author__", "Foxhole Stockpiles Contributors")?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("__author__", env!("CARGO_PKG_AUTHORS"))?;
 
     // OCR backend feature flags
     m.add("HAS_OCR_BASIC", true)?; // ocrs - always available
