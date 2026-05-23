@@ -1162,6 +1162,14 @@ fn preprocess_light_text(
     // washed out; autocontrast normalizes both cases to full dynamic range.
     autocontrast(&mut grayscale, 2);
 
+    // Trim blank left/right margins down to the text extent before upscaling.
+    // The detection box is padded, so names/types carry a wide blank margin that
+    // the recognizer otherwise reads as a spurious leading glyph (e.g. a stray
+    // "8" before "ABDC-AST-B"). A margin of half the line height keeps breathing
+    // room. Trimming pre-upscale also avoids enlarging dead pixels.
+    let margin = height / 2;
+    let (grayscale, width) = trim_columns_to_content(&grayscale, width, height, margin);
+
     // Upscale for better OCR.
     let upscale = upscale_base / scale_factor;
     let new_w = ((width as f64) * upscale) as usize;
@@ -1176,6 +1184,59 @@ fn preprocess_light_text(
 /// Mirrors PIL's `ImageOps.autocontrast`: `cutoff_percent` of the pixel
 /// population is clipped from each end of the histogram before computing the
 /// low/high bounds, so a few outlier pixels don't dominate the mapping.
+/// Crop blank left/right margins of a single-line grayscale strip down to the
+/// text extent (plus `margin` columns of breathing room on each side).
+///
+/// A column carrying text spans both ink and background pixels vertically, so
+/// its luma range is large; a blank column is near-uniform. Using the per-column
+/// range makes this polarity-agnostic, which matters because the UI theme can
+/// render the strip as light-on-dark or dark-on-light. If no column clears the
+/// activity threshold (a genuinely blank strip), the input is returned unchanged
+/// rather than cropped to nothing.
+fn trim_columns_to_content(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    margin: usize,
+) -> (Vec<u8>, usize) {
+    if width == 0 || height == 0 {
+        return (gray.to_vec(), width);
+    }
+
+    // 64 ≈ a quarter of the full 0..=255 range that autocontrast stretches to.
+    const ACTIVITY_THRESHOLD: u8 = 64;
+
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    for x in 0..width {
+        let (mut min, mut max) = (255u8, 0u8);
+        for y in 0..height {
+            let v = gray[y * width + x];
+            min = min.min(v);
+            max = max.max(v);
+        }
+        if max - min >= ACTIVITY_THRESHOLD {
+            first.get_or_insert(x);
+            last = x;
+        }
+    }
+
+    let Some(first) = first else {
+        return (gray.to_vec(), width);
+    };
+
+    let lo = first.saturating_sub(margin);
+    let hi = (last + margin + 1).min(width);
+    let new_w = hi - lo;
+
+    let mut out = Vec::with_capacity(new_w * height);
+    for y in 0..height {
+        let row = y * width;
+        out.extend_from_slice(&gray[row + lo..row + hi]);
+    }
+    (out, new_w)
+}
+
 fn autocontrast(gray: &mut [u8], cutoff_percent: u32) {
     if gray.is_empty() {
         return;
@@ -1245,6 +1306,28 @@ fn preprocess_for_shard(
     }
 
     autocontrast(&mut processed, 2);
+
+    // Normalize polarity to light-on-dark. The recognizer is trained on bright
+    // text over a dark background (matching the in-game type banner), but the
+    // shard/timestamp strip can render dark-on-light depending on the UI theme;
+    // fed inverted, the model decodes to junk. After autocontrast the background
+    // dominates one extreme, so a bright mean means dark-text-on-light and we
+    // flip it.
+    let mean: u32 =
+        processed.iter().map(|&v| v as u32).sum::<u32>() / processed.len().max(1) as u32;
+    if mean > 127 {
+        for v in processed.iter_mut() {
+            *v = 255 - *v;
+        }
+    }
+
+    // Crop the blank left/right margins down to the text extent. The strips
+    // place a short word (e.g. "ABLE") in a wide region, leaving most of the
+    // crop empty; the recognizer expects a line image where text fills the
+    // frame, and a mostly-empty strip decodes to junk. Margin is half a line
+    // height so the glyphs keep a little breathing room.
+    let margin = (height / lines.max(1)) / 2;
+    let (processed, width) = trim_columns_to_content(&processed, width, height, margin);
 
     // Upscale tiny regions toward a legible line height. At low resolutions a
     // single shard/timestamp line can be ~13px tall, below what Tesseract reads
@@ -1447,6 +1530,34 @@ mod tests {
         let mut gray: Vec<u8> = Vec::new();
         autocontrast(&mut gray, 2); // must not panic
         assert!(gray.is_empty());
+    }
+
+    #[test]
+    fn trim_columns_crops_blank_margins_to_text_extent() {
+        // 10-wide, 4-tall strip: a high-contrast column at x=3 and x=4 (text),
+        // everything else flat (blank). With margin 1 the kept span is [2, 6).
+        let width = 10;
+        let height = 4;
+        let mut gray = vec![0u8; width * height];
+        // Text columns carry ink on some rows and background on others, giving
+        // them a large vertical range; a fully-uniform column would not count.
+        for &x in &[3usize, 4] {
+            gray[width + x] = 255; // row 1
+            gray[2 * width + x] = 255; // row 2
+        }
+        let (out, new_w) = trim_columns_to_content(&gray, width, height, 1);
+        assert_eq!(new_w, 4); // cols 2,3,4,5
+        assert_eq!(out.len(), new_w * height);
+    }
+
+    #[test]
+    fn trim_columns_leaves_blank_strip_unchanged() {
+        // No column clears the activity threshold: return the input untouched
+        // rather than cropping to nothing.
+        let gray = vec![40u8; 8 * 3];
+        let (out, new_w) = trim_columns_to_content(&gray, 8, 3, 2);
+        assert_eq!(new_w, 8);
+        assert_eq!(out, gray);
     }
 
     /// Build a grayscale buffer where the given inclusive row ranges are "text"
