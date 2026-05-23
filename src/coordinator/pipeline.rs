@@ -347,6 +347,9 @@ impl ScanPipeline {
                     proc_h as i32,
                     1, // grayscale
                 ) {
+                    if debug_ocr::enabled() {
+                        eprintln!("[FS_DEBUG_OCR] type region raw text: {:?}", text);
+                    }
                     client_language = ClientLanguage::detect(&text);
                     let stockpile_type = StockpileType::from_string(&text);
                     stockpile.stockpile_type = stockpile_type;
@@ -545,6 +548,9 @@ impl ScanPipeline {
         }
 
         if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
+            if debug_ocr::enabled() {
+                eprintln!("[FS_DEBUG_OCR] timestamp region raw text: {:?}", text);
+            }
             let timestamp = extract_day_and_hour(&text);
             if !timestamp.is_empty() {
                 stockpile.ingame_timestamp = Some(timestamp);
@@ -569,6 +575,9 @@ impl ScanPipeline {
         }
 
         if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
+            if debug_ocr::enabled() {
+                eprintln!("[FS_DEBUG_OCR] shard region raw text: {:?}", text);
+            }
             if let Some(shard) = match_shard_name(&text) {
                 stockpile.shard = Some(shard.to_string());
             }
