@@ -26,6 +26,14 @@ const RECOGNITION_MODEL: &str = "text-recognition.rten";
 /// precedence, letting users swap in a better model without recompiling.
 static EMBEDDED_RECOGNITION_MODEL: &[u8] = include_bytes!("../../data/text-recognition.rten");
 
+/// Alphabet for the recognition model. MUST match `training/alphabet.txt` and
+/// the model's output-column order exactly (class `i+1` ↔ char at byte-index
+/// `i`; class 0 is the CTC blank). 186 chars: ocrs' default Latin/digit/symbol
+/// set + full Russian Cyrillic + the closed Hanzi set from the stockpile-type
+/// translations + the CN timestamp glyphs (日时分，). Regenerate via
+/// `training/build_alphabet.py` if the type translations change.
+const RECOGNITION_ALPHABET: &str = r##" 0123456789!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~EABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя营地要塞安全屋遗迹基堡边境城镇下仓库海港日时分，"##;
+
 /// Ocrs-based OCR engine implementing the OcrEngine trait.
 pub struct OcrsEngine {
     /// Configuration.
@@ -49,7 +57,8 @@ impl OcrsEngine {
         }
 
         // Try to load models
-        let (engine, available) = Self::try_load_engine(&config.data_path);
+        let (engine, available) =
+            Self::try_load_engine(&config.data_path, config.allowed_chars.as_deref());
 
         if !available {
             eprintln!("Warning: failed to load the ocrs recognition model. Basic OCR will return empty results.");
@@ -65,7 +74,10 @@ impl OcrsEngine {
     /// Try to load the ocrs engine.
     /// Prefers a user-supplied model file in the data path, falling back to the
     /// embedded model. Only loads recognition (no detection) for speed.
-    fn try_load_engine(data_path: &str) -> (Option<OcrsOcrEngine>, bool) {
+    fn try_load_engine(
+        data_path: &str,
+        allowed_chars: Option<&str>,
+    ) -> (Option<OcrsOcrEngine>, bool) {
         let recognition_path = std::path::Path::new(data_path).join(RECOGNITION_MODEL);
 
         // A model file in the data dir overrides the embedded one; otherwise
@@ -91,6 +103,8 @@ impl OcrsEngine {
         // Create OCR engine with recognition only
         match OcrsOcrEngine::new(OcrEngineParams {
             recognition_model: Some(recognition_model),
+            alphabet: Some(RECOGNITION_ALPHABET.to_string()),
+            allowed_chars: allowed_chars.map(|s| s.to_string()),
             ..Default::default()
         }) {
             Ok(engine) => (Some(engine), true),
@@ -113,7 +127,8 @@ impl OcrsEngine {
             .map_err(|e| FsOcrError::Ocr(format!("Engine lock poisoned: {}", e)))?;
 
         if engine_guard.is_none() {
-            let (engine, _) = Self::try_load_engine(&self.config.data_path);
+            let (engine, _) =
+                Self::try_load_engine(&self.config.data_path, self.config.allowed_chars.as_deref());
             *engine_guard = engine;
         }
 

@@ -59,12 +59,32 @@ mod ocrs_extractor {
                 model_name: model_name.to_string(),
                 psm: 6,
                 whitelist: "0123456789k+".to_string(),
+                allowed_chars: None,
             };
             let engine = OcrsEngine::new(config).ok();
             Ok(Self {
                 engine,
                 model_name: model_name.to_string(),
                 data_path: path,
+            })
+        }
+
+        /// Create a single-line text extractor restricted to `allowed_chars`.
+        /// The ocrs recognizer may then only emit those characters, keeping
+        /// closed-vocabulary fields (shard names, the localized timestamp line)
+        /// on-script. Mirrors `new_for_text_block_default`'s hardcoded "data"
+        /// path so the masked engine loads the same recognition model.
+        pub fn new_for_text_default_with_allowed(
+            model_name: &str,
+            allowed_chars: &str,
+        ) -> crate::error::Result<Self> {
+            let mut config = OcrConfig::for_text_line("data", model_name);
+            config.allowed_chars = Some(allowed_chars.to_string());
+            let engine = OcrsEngine::new(config).ok();
+            Ok(Self {
+                engine,
+                model_name: model_name.to_string(),
+                data_path: "data".to_string(),
             })
         }
 

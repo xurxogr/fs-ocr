@@ -476,6 +476,17 @@ impl StockpileScanner {
         self.pipeline.is_preloaded()
     }
 
+    /// Eagerly build the masked OCR engines for the shard name and the
+    /// per-script timestamp lines, so the first scan of each script doesn't pay
+    /// the model-load cost. Optional: long-lived scanners benefit from calling
+    /// it once at startup; single-shot CLI use can skip it (engines build
+    /// lazily). No-op when built with the Tesseract backend.
+    pub fn warmup(&self) -> PyResult<()> {
+        self.pipeline
+            .warmup()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "StockpileScanner(database='{}', data='{}')",

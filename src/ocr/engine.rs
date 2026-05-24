@@ -17,6 +17,11 @@ pub struct OcrConfig {
     pub psm: i32,
     /// Character whitelist (empty = all characters).
     pub whitelist: String,
+    /// Decode-time character mask for the ocrs backend. When set, the recognizer
+    /// may only emit these characters (others are excluded before CTC decode),
+    /// which keeps closed-vocabulary fields on-script. `None` = no restriction.
+    /// Ignored by the Tesseract backend.
+    pub allowed_chars: Option<String>,
 }
 
 impl OcrConfig {
@@ -27,6 +32,7 @@ impl OcrConfig {
             model_name: "renner_numbers".to_string(),
             psm: 6,
             whitelist: "0123456789k+".to_string(),
+            allowed_chars: None,
         }
     }
 
@@ -37,6 +43,7 @@ impl OcrConfig {
             model_name: model.to_string(),
             psm: 7,
             whitelist: String::new(),
+            allowed_chars: None,
         }
     }
 
@@ -47,6 +54,7 @@ impl OcrConfig {
             model_name: model.to_string(),
             psm: 6,
             whitelist: String::new(),
+            allowed_chars: None,
         }
     }
 }

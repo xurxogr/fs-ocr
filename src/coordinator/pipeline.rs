@@ -7,6 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(not(feature = "ocr-full"))]
+use std::collections::HashMap;
+#[cfg(not(feature = "ocr-full"))]
+use std::sync::Mutex;
+
 /// Maximum total boxes to process (prevents DoS via excessive memory allocation).
 /// A typical Foxhole stockpile has 6 columns × ~10 rows = 60 items max per view.
 const MAX_TOTAL_BOXES: usize = 200;
@@ -25,6 +30,28 @@ use crate::ocr::{digit_matcher, preprocess, TextExtractor};
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, TemplateMatcher};
 use crate::template::phash::compute_phash;
+
+/// Decode-time character masks for the ocrs backend (see `OcrConfig::allowed_chars`).
+/// Restricting the recognizer to a field's plausible character set keeps
+/// closed-vocabulary reads on-script (e.g. a Latin shard never decodes to
+/// Cyrillic) and stops marker words from being hallucinated as stray digits.
+///
+/// Shard names are a fixed Latin set (ABLE / CHARLIE / DevBranch / LIVE).
+#[cfg(not(feature = "ocr-full"))]
+const SHARD_MASK: &str = "ABCDEHILRVacehnrv";
+
+/// Timestamp masks are per script, matching the 3-way `ClientLanguage`. Each
+/// allows digits, spaces and the separators (`, . : -`) plus that script's
+/// letters, so the localized `Day`/`Hours` markers decode as letters (which the
+/// parser discards) instead of corrupting the digit run. Latin uses the full
+/// alphabet so any Latin client (EN/DE/FR/PT/…) reads correctly.
+#[cfg(not(feature = "ocr-full"))]
+const TIME_MASK_LATIN: &str = "0123456789 ,.:-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+#[cfg(not(feature = "ocr-full"))]
+const TIME_MASK_CYRILLIC: &str =
+    "0123456789 ,.:-АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя";
+#[cfg(not(feature = "ocr-full"))]
+const TIME_MASK_CHINESE: &str = "0123456789,，日时分";
 
 /// Main scanning pipeline for stockpile screenshots.
 pub struct ScanPipeline {
@@ -49,6 +76,13 @@ pub struct ScanPipeline {
     block_extractor_eng: Option<TextExtractor>,
     /// Text extractor for type/name (Tesseract if ocr-full, otherwise ocrs).
     text_extractor: Option<TextExtractor>,
+    /// Lazily-built ocrs extractors keyed by their `allowed_chars` mask. A scan
+    /// touches at most two masks (the fixed shard mask plus one script's
+    /// timestamp mask), so this caches them across scans without reloading the
+    /// recognition model more than once per distinct mask. ocrs-only — the
+    /// Tesseract backend reads the region as one block and does not use masks.
+    #[cfg(not(feature = "ocr-full"))]
+    masked_extractors: Mutex<HashMap<String, TextExtractor>>,
 }
 
 impl ScanPipeline {
@@ -62,6 +96,8 @@ impl ScanPipeline {
             block_extractor_multi: None,
             block_extractor_eng: None,
             text_extractor: None,
+            #[cfg(not(feature = "ocr-full"))]
+            masked_extractors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -150,6 +186,39 @@ impl ScanPipeline {
     /// Check if the scanner is preloaded.
     pub fn is_preloaded(&self) -> bool {
         self.database.is_some()
+    }
+
+    /// Eagerly build the masked recognition engines so the first scan of each
+    /// script doesn't pay the model-load cost. Long-lived (library) callers can
+    /// call this once up front; CLI single-shot callers can skip it and let the
+    /// engines build lazily on first use. Builds the fixed shard mask plus the
+    /// timestamp masks for every `ClientLanguage` (Latin/Cyrillic/Chinese), so
+    /// no argument is needed — there are only three scripts. No-op on the
+    /// Tesseract (`ocr-full`) backend, which doesn't use decode masks.
+    #[cfg(not(feature = "ocr-full"))]
+    pub fn warmup(&self) -> Result<()> {
+        let mut cache = self
+            .masked_extractors
+            .lock()
+            .map_err(|e| FsOcrError::Ocr(format!("Masked extractor lock poisoned: {}", e)))?;
+        let masks = [
+            SHARD_MASK,
+            ClientLanguage::English.time_mask(),
+            ClientLanguage::Russian.time_mask(),
+            ClientLanguage::Chinese.time_mask(),
+        ];
+        for mask in masks {
+            cache.entry(mask.to_string()).or_insert_with(|| {
+                TextExtractor::new_for_text_default_with_allowed("eng", mask).unwrap_or_default()
+            });
+        }
+        Ok(())
+    }
+
+    /// No-op warmup on the Tesseract backend (no decode masks to build).
+    #[cfg(feature = "ocr-full")]
+    pub fn warmup(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Public wrapper for ensure_initialized (for debug methods).
@@ -377,7 +446,15 @@ impl ScanPipeline {
             };
 
             if let Some(engine) = engine {
-                self.read_shard_region(image, width, height, (x, y, w, h), engine, stockpile);
+                self.read_shard_region(
+                    image,
+                    width,
+                    height,
+                    (x, y, w, h),
+                    engine,
+                    client_language,
+                    stockpile,
+                );
             }
         }
 
@@ -472,6 +549,7 @@ impl ScanPipeline {
         height: i32,
         region: (i32, i32, i32, i32),
         engine: &TextExtractor,
+        _client_language: ClientLanguage,
         stockpile: &mut Stockpile,
     ) {
         let (x, y, w, h) = region;
@@ -514,9 +592,33 @@ impl ScanPipeline {
         }
     }
 
+    /// Run the ocrs recognizer over `image` with a decode mask, building and
+    /// caching one masked extractor per distinct `allowed_chars` string. The
+    /// cache lock is held across the recognition call, which is fine: ocrs runs
+    /// single-threaded (RTEN_NUM_THREADS=1) and scans are serial.
+    #[cfg(not(feature = "ocr-full"))]
+    fn extract_with_mask(
+        &self,
+        allowed_chars: &str,
+        image: &[u8],
+        width: i32,
+        height: i32,
+    ) -> Result<String> {
+        let mut cache = self
+            .masked_extractors
+            .lock()
+            .map_err(|e| FsOcrError::Ocr(format!("Masked extractor lock poisoned: {}", e)))?;
+        let extractor = cache.entry(allowed_chars.to_string()).or_insert_with(|| {
+            TextExtractor::new_for_text_default_with_allowed("eng", allowed_chars)
+                .unwrap_or_default()
+        });
+        extractor.extract_text(image, width, height, 1)
+    }
+
     /// See the `ocr-full` variant above for the rationale behind the per-backend
     /// split. This (ocrs) path reads the timestamp and shard as two single-line
-    /// half-crops.
+    /// half-crops, each with a decode mask: the timestamp uses the client's
+    /// script mask, the shard the fixed Latin shard mask.
     #[cfg(not(feature = "ocr-full"))]
     fn read_shard_region(
         &self,
@@ -524,7 +626,8 @@ impl ScanPipeline {
         width: i32,
         height: i32,
         region: (i32, i32, i32, i32),
-        engine: &TextExtractor,
+        _engine: &TextExtractor,
+        client_language: ClientLanguage,
         stockpile: &mut Stockpile,
     ) {
         let (x, y, w, h) = region;
@@ -547,7 +650,12 @@ impl ScanPipeline {
             debug_ocr::save_gray("timestamp", &processed, proc_w, proc_h);
         }
 
-        if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
+        if let Ok(text) = self.extract_with_mask(
+            client_language.time_mask(),
+            &processed,
+            proc_w as i32,
+            proc_h as i32,
+        ) {
             if debug_ocr::enabled() {
                 eprintln!("[FS_DEBUG_OCR] timestamp region raw text: {:?}", text);
             }
@@ -574,7 +682,9 @@ impl ScanPipeline {
             debug_ocr::save_gray("shard", &processed, proc_w, proc_h);
         }
 
-        if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
+        if let Ok(text) =
+            self.extract_with_mask(SHARD_MASK, &processed, proc_w as i32, proc_h as i32)
+        {
             if debug_ocr::enabled() {
                 eprintln!("[FS_DEBUG_OCR] shard region raw text: {:?}", text);
             }
@@ -1375,10 +1485,20 @@ impl ClientLanguage {
         }
         ClientLanguage::English
     }
+
+    /// The timestamp decode mask for this client's script.
+    #[cfg(not(feature = "ocr-full"))]
+    fn time_mask(self) -> &'static str {
+        match self {
+            ClientLanguage::English => TIME_MASK_LATIN,
+            ClientLanguage::Russian => TIME_MASK_CYRILLIC,
+            ClientLanguage::Chinese => TIME_MASK_CHINESE,
+        }
+    }
 }
 
 /// Known shard names. The shard-name crop is a single Latin word.
-const KNOWN_SHARDS: [&str; 3] = ["ABLE", "CHARLIE", "Devbranch"];
+const KNOWN_SHARDS: [&str; 4] = ["ABLE", "CHARLIE", "LIVE", "Devbranch"];
 
 /// Match OCR'd shard text to the closest known shard name.
 ///
@@ -1438,6 +1558,7 @@ mod tests {
     fn match_shard_name_matches_exact_names() {
         assert_eq!(match_shard_name("ABLE"), Some("ABLE"));
         assert_eq!(match_shard_name("CHARLIE"), Some("CHARLIE"));
+        assert_eq!(match_shard_name("LIVE"), Some("LIVE"));
         assert_eq!(match_shard_name("Devbranch"), Some("Devbranch"));
     }
 
@@ -1481,9 +1602,14 @@ mod tests {
 
     #[test]
     fn extracts_day_and_hour_from_cjk_and_cyrillic_text() {
-        // The Chinese client uses a fullwidth comma (`，`, U+FF0C), not ASCII.
-        assert_eq!(extract_day_and_hour("第 1529 天，0851 小时"), "1529, 08:51");
-        assert_eq!(extract_day_and_hour("День 702, 0304 часов"), "702, 03:04");
+        // Real in-game formats: Chinese uses a fullwidth comma (`，`, U+FF0C)
+        // and the 日/时/分 markers; the day carries a thousands separator. The
+        // non-digit glyphs and separators are all stripped before parsing.
+        assert_eq!(extract_day_and_hour("1,529日，08时51分"), "1529, 08:51");
+        assert_eq!(
+            extract_day_and_hour("1,529-й день, 08:51 часов"),
+            "1529, 08:51"
+        );
     }
 
     #[test]

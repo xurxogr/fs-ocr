@@ -29,7 +29,7 @@ pub struct Stockpile {
     /// Scan timestamp (ISO 8601 format).
     pub timestamp: String,
 
-    /// Game shard name (e.g., "ABLE", "BAKER").
+    /// Game shard name (e.g., "ABLE", "CHARLIE", "LIVE").
     pub shard: Option<String>,
 
     /// In-game timestamp (e.g., "Day 1293, 1906 Hours").
