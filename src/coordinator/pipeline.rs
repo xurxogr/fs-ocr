@@ -264,8 +264,13 @@ impl ScanPipeline {
             h as usize,
         );
 
-        let (processed, proc_w, proc_h) =
-            preprocess_light_text(&region_img, w as usize, h as usize, scale_factor, 2.0);
+        let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+            &region_img,
+            w as usize,
+            h as usize,
+            1,
+            &PreprocessParams::light_text(scale_factor, 2.0),
+        );
 
         let text = extractor.extract_text(&processed, proc_w as i32, proc_h as i32, 1)?;
         Ok(text)
@@ -403,8 +408,13 @@ impl ScanPipeline {
                 );
 
                 // Minimal preprocessing for OCR (no binarization for multilingual support)
-                let (processed, proc_w, proc_h) =
-                    preprocess_light_text(&type_img, w as usize, h as usize, scale_factor, 2.0);
+                let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+                    &type_img,
+                    w as usize,
+                    h as usize,
+                    1,
+                    &PreprocessParams::light_text(scale_factor, 2.0),
+                );
 
                 if debug_ocr::enabled() {
                     debug_ocr::save_gray("type", &processed, proc_w, proc_h);
@@ -474,8 +484,13 @@ impl ScanPipeline {
                     );
 
                     // Preprocess with extra upscale for better name detection
-                    let (processed, proc_w, proc_h) =
-                        preprocess_light_text(&name_img, w as usize, h as usize, scale_factor, 4.0);
+                    let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+                        &name_img,
+                        w as usize,
+                        h as usize,
+                        1,
+                        &PreprocessParams::name(scale_factor, 4.0),
+                    );
 
                     // The game wraps long names across two rows. Detect genuine
                     // row wrapping (a tall blank gap between text bands) and, when
@@ -565,8 +580,13 @@ impl ScanPipeline {
 
         // The region is two text lines; upscale toward a legible per-line height
         // so low-res crops stay readable as a block.
-        let (processed, proc_w, proc_h) =
-            preprocess_for_shard(&block_img, w as usize, h as usize, 2);
+        let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+            &block_img,
+            w as usize,
+            h as usize,
+            2,
+            &PreprocessParams::strip(),
+        );
 
         if debug_ocr::enabled() {
             debug_ocr::save_gray("shard_block", &processed, proc_w, proc_h);
@@ -643,8 +663,13 @@ impl ScanPipeline {
             w as usize,
             half_h as usize,
         );
-        let (processed, proc_w, proc_h) =
-            preprocess_for_shard(&timestamp_img, w as usize, half_h as usize, 1);
+        let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+            &timestamp_img,
+            w as usize,
+            half_h as usize,
+            1,
+            &PreprocessParams::strip(),
+        );
 
         if debug_ocr::enabled() {
             debug_ocr::save_gray("timestamp", &processed, proc_w, proc_h);
@@ -675,8 +700,13 @@ impl ScanPipeline {
             w as usize,
             half_h as usize,
         );
-        let (processed, proc_w, proc_h) =
-            preprocess_for_shard(&shard_img, w as usize, half_h as usize, 1);
+        let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+            &shard_img,
+            w as usize,
+            half_h as usize,
+            1,
+            &PreprocessParams::strip(),
+        );
 
         if debug_ocr::enabled() {
             debug_ocr::save_gray("shard", &processed, proc_w, proc_h);
@@ -1244,49 +1274,183 @@ fn join_lines_horizontally(lines: &[(Vec<u8>, usize, usize)]) -> (Vec<u8>, usize
     (canvas, canvas_w, canvas_h)
 }
 
-/// Preprocess light text on dark background (type, name).
-/// Uses luma.max(144) + tight crop around bright pixels + bilinear upscale.
-///
-/// Args:
-///   upscale_base: Base upscale factor (2.0 for type, 4.0 for name)
-fn preprocess_light_text(
+/// Upscale strategy for the recognizer preprocessing.
+enum Upscale {
+    /// Continuous bilinear scale by `base / scale_factor` (resolution-driven).
+    /// Used for the type and name fields.
+    Continuous { base: f64, scale_factor: f64 },
+    /// Integer factor toward a target per-line height (crop-driven). Used for
+    /// the shard/timestamp strips, which stack `lines` text rows.
+    LineHeight,
+}
+
+/// The per-field knobs that distinguish one recognizer input from another. The
+/// pipeline itself (luma -> autocontrast -> [polarity] -> [trim_rows] ->
+/// trim_columns -> [pad] -> upscale) is shared; these toggles select the
+/// optional steps.
+struct PreprocessParams {
+    /// Flip to light-on-dark when the post-autocontrast mean is bright. The
+    /// recognizer is trained light-on-dark, so a dark-on-light strip must be
+    /// inverted or it decodes to junk.
+    normalize_polarity: bool,
+    /// Crop blank top/bottom rows down to the text band. The name detection box
+    /// can be much taller than the text (the glyphs sit bottom-aligned in a tall
+    /// frame), and the recognizer resizes the whole frame to a fixed height —
+    /// leaving the empty band in shrinks the glyphs out of distribution.
+    trim_rows: bool,
+    /// When `Some(frac)` and the crop is a single line, pad dark rows so the
+    /// text band fills ~`frac` of the frame height (matching the training
+    /// text-to-frame ratio).
+    pad_fraction: Option<f64>,
+    /// How to scale the trimmed crop up toward a legible size for the model.
+    upscale: Upscale,
+}
+
+impl PreprocessParams {
+    /// Light-on-dark banner/line (type, name). The crop is already bright text
+    /// on a dark background, so no polarity flip and no vertical padding; scale
+    /// continuously by `upscale_base / scale_factor` (2.0 for the type banner,
+    /// 4.0 for the smaller name line).
+    fn light_text(scale_factor: f64, upscale_base: f64) -> Self {
+        Self {
+            normalize_polarity: false,
+            trim_rows: false,
+            pad_fraction: None,
+            upscale: Upscale::Continuous {
+                base: upscale_base,
+                scale_factor,
+            },
+        }
+    }
+
+    /// Stockpile name line. Like [`light_text`](Self::light_text) but trims the
+    /// blank vertical band (the name box is often far taller than the glyphs,
+    /// which sit bottom-aligned) and then re-pads to the training text-to-frame
+    /// ratio, so the glyphs reach the recognizer at the scale it was trained on.
+    fn name(scale_factor: f64, upscale_base: f64) -> Self {
+        Self {
+            normalize_polarity: false,
+            trim_rows: true,
+            pad_fraction: Some(0.62),
+            upscale: Upscale::Continuous {
+                base: upscale_base,
+                scale_factor,
+            },
+        }
+    }
+
+    /// Shard/timestamp strip. The strip can render dark-on-light depending on
+    /// the UI theme, so normalize polarity; pad single-line crops toward the
+    /// training text-to-frame ratio; upscale toward a legible per-line height.
+    fn strip() -> Self {
+        Self {
+            normalize_polarity: true,
+            trim_rows: false,
+            pad_fraction: Some(0.62),
+            upscale: Upscale::LineHeight,
+        }
+    }
+}
+
+/// Shared preprocessing for every field read by the ocrs recognizer (type,
+/// name, shard, timestamp). The step order is fixed; `params` selects the
+/// optional polarity/padding steps and the upscale strategy so each field keeps
+/// its established behavior behind a single code path.
+fn preprocess_for_recognizer(
     image: &[u8],
     width: usize,
     height: usize,
-    scale_factor: f64,
-    upscale_base: f64,
+    lines: usize,
+    params: &PreprocessParams,
 ) -> (Vec<u8>, usize, usize) {
-    // Convert RGB to grayscale.
-    let mut grayscale = Vec::with_capacity(width * height);
+    // Standard luma conversion: 0.299*R + 0.587*G + 0.114*B.
+    let mut processed = Vec::with_capacity(width * height);
     for chunk in image.chunks_exact(3) {
         let luma =
             ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128)
                 >> 8) as u8;
-        grayscale.push(luma);
+        processed.push(luma);
     }
 
-    // Stretch contrast so text becomes legible regardless of base brightness.
-    // The previous approach floored brightness and cropped around near-white
-    // pixels, which only worked for bright text on a dark info bar. Localized
-    // names like the Chinese "公共" are low-contrast grey-on-grey and were
-    // washed out; autocontrast normalizes both cases to full dynamic range.
-    autocontrast(&mut grayscale, 2);
+    // Stretch contrast so text becomes legible regardless of base brightness;
+    // low-contrast grey-on-grey names and bright info bars both normalize to the
+    // full dynamic range.
+    autocontrast(&mut processed, 2);
 
-    // Trim blank left/right margins down to the text extent before upscaling.
-    // The detection box is padded, so names/types carry a wide blank margin that
-    // the recognizer otherwise reads as a spurious leading glyph (e.g. a stray
-    // "8" before "ABDC-AST-B"). A margin of half the line height keeps breathing
-    // room. Trimming pre-upscale also avoids enlarging dead pixels.
-    let margin = height / 2;
-    let (grayscale, width) = trim_columns_to_content(&grayscale, width, height, margin);
+    // Normalize polarity to light-on-dark. After autocontrast the background
+    // dominates one extreme, so a bright mean means dark-text-on-light: flip it.
+    if params.normalize_polarity {
+        let mean: u32 =
+            processed.iter().map(|&v| v as u32).sum::<u32>() / processed.len().max(1) as u32;
+        if mean > 127 {
+            for v in processed.iter_mut() {
+                *v = 255 - *v;
+            }
+        }
+    }
 
-    // Upscale for better OCR.
-    let upscale = upscale_base / scale_factor;
-    let new_w = ((width as f64) * upscale) as usize;
-    let new_h = ((height as f64) * upscale) as usize;
-    let upscaled = preprocess::upscale_bilinear(&grayscale, width, height, new_w, new_h);
+    // Trim the blank vertical band down to the text rows. The name box is often
+    // much taller than the glyphs (which sit bottom-aligned), and the recognizer
+    // resizes the whole frame to a fixed height; without this the glyphs arrive
+    // shrunk out of the training distribution and decode to junk.
+    let (processed, height) = if params.trim_rows && lines == 1 {
+        let margin = (height / lines.max(1)) / 8;
+        trim_rows_to_content(&processed, width, height, margin)
+    } else {
+        (processed, height)
+    };
 
-    (upscaled, new_w, new_h)
+    // Trim blank left/right margins down to the text extent before scaling. The
+    // detection box is padded, so a wide empty crop otherwise decodes a spurious
+    // leading glyph. A margin of half a line height keeps breathing room.
+    let margin = (height / lines.max(1)) / 2;
+    let (processed, width) = trim_columns_to_content(&processed, width, height, margin);
+
+    // Re-pad the vertical frame toward the recognizer's training text-to-frame
+    // ratio. Single-line only: a multi-line block stacks rows and would need
+    // per-row banding, so leave it untouched there.
+    let (processed, height) = match params.pad_fraction {
+        Some(frac) if lines == 1 => pad_rows_to_text_fraction(&processed, width, height, frac),
+        _ => (processed, height),
+    };
+
+    apply_upscale(processed, width, height, lines, &params.upscale)
+}
+
+/// Scale the trimmed crop up per the chosen `Upscale` strategy.
+fn apply_upscale(
+    buf: Vec<u8>,
+    width: usize,
+    height: usize,
+    lines: usize,
+    upscale: &Upscale,
+) -> (Vec<u8>, usize, usize) {
+    match *upscale {
+        Upscale::Continuous { base, scale_factor } => {
+            let factor = base / scale_factor;
+            let new_w = ((width as f64) * factor) as usize;
+            let new_h = ((height as f64) * factor) as usize;
+            let scaled = preprocess::upscale_bilinear(&buf, width, height, new_w, new_h);
+            (scaled, new_w, new_h)
+        }
+        Upscale::LineHeight => {
+            // Target a legible per-line height. At low resolutions a single line
+            // can be ~13px tall, below what the model reads reliably; the factor
+            // targets a per-line height rather than blindly multiplying, since
+            // over-upscaling blurs and hurts OCR.
+            const TARGET_LINE_HEIGHT: usize = 26;
+            let line_height = (height / lines.max(1)).max(1);
+            let factor = ((TARGET_LINE_HEIGHT + line_height / 2) / line_height).max(1);
+            if factor > 1 {
+                let new_w = width * factor;
+                let new_h = height * factor;
+                let scaled = preprocess::upscale_bilinear(&buf, width, height, new_w, new_h);
+                (scaled, new_w, new_h)
+            } else {
+                (buf, width, height)
+            }
+        }
+    }
 }
 
 /// Stretch the grayscale histogram to full [0, 255] range in place.
@@ -1345,6 +1509,48 @@ fn trim_columns_to_content(
         out.extend_from_slice(&gray[row + lo..row + hi]);
     }
     (out, new_w)
+}
+
+/// Crop blank top/bottom rows of a single-line grayscale strip down to the text
+/// band (plus `margin` rows of breathing room on each side).
+///
+/// A row is "text" if it holds a bright pixel (> 200; the input is light-on-dark
+/// after autocontrast and any polarity flip). The `> 200` test ignores the dim
+/// speckle noise that fills the empty band of an unpinned name crop, so a few
+/// stray pixels don't defeat the trim. If no row clears the threshold (a blank
+/// strip), the input is returned unchanged rather than cropped to nothing.
+fn trim_rows_to_content(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    margin: usize,
+) -> (Vec<u8>, usize) {
+    if width == 0 || height == 0 {
+        return (gray.to_vec(), height);
+    }
+
+    const BRIGHT: u8 = 200;
+
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    for y in 0..height {
+        let row = &gray[y * width..y * width + width];
+        if row.iter().any(|&v| v > BRIGHT) {
+            first.get_or_insert(y);
+            last = y;
+        }
+    }
+
+    let Some(first) = first else {
+        return (gray.to_vec(), height);
+    };
+
+    let lo = first.saturating_sub(margin);
+    let hi = (last + margin + 1).min(height);
+    let new_h = hi - lo;
+
+    let out = gray[lo * width..hi * width].to_vec();
+    (out, new_h)
 }
 
 /// Pad dark rows above and below the text so the bright text band occupies
@@ -1447,81 +1653,6 @@ fn autocontrast(gray: &mut [u8], cutoff_percent: u32) {
         let clamped = (*v as usize).clamp(lo, hi);
         *v = (((clamped - lo) as f32 / span) * 255.0).round() as u8;
     }
-}
-
-/// Preprocess for shard/timestamp text.
-///
-/// Converts to grayscale and stretches the histogram to full range. The earlier
-/// `luma.max(144)` brightness floor assumed bright text on a dark bar; on the
-/// dark UI theme the text is dark on a dark panel, so flooring collapsed the
-/// whole region to a flat grey and erased the text. Autocontrast normalizes
-/// both themes to full dynamic range while preserving polarity.
-fn preprocess_for_shard(
-    image: &[u8],
-    width: usize,
-    height: usize,
-    lines: usize,
-) -> (Vec<u8>, usize, usize) {
-    let mut processed = Vec::with_capacity(width * height);
-
-    for chunk in image.chunks_exact(3) {
-        // Standard luma conversion: 0.299*R + 0.587*G + 0.114*B
-        let luma =
-            ((77u16 * chunk[0] as u16 + 150u16 * chunk[1] as u16 + 29u16 * chunk[2] as u16 + 128)
-                >> 8) as u8;
-        processed.push(luma);
-    }
-
-    autocontrast(&mut processed, 2);
-
-    // Normalize polarity to light-on-dark. The recognizer is trained on bright
-    // text over a dark background (matching the in-game type banner), but the
-    // shard/timestamp strip can render dark-on-light depending on the UI theme;
-    // fed inverted, the model decodes to junk. After autocontrast the background
-    // dominates one extreme, so a bright mean means dark-text-on-light and we
-    // flip it.
-    let mean: u32 =
-        processed.iter().map(|&v| v as u32).sum::<u32>() / processed.len().max(1) as u32;
-    if mean > 127 {
-        for v in processed.iter_mut() {
-            *v = 255 - *v;
-        }
-    }
-
-    // Crop the blank left/right margins down to the text extent. The strips
-    // place a short word (e.g. "ABLE") in a wide region, leaving most of the
-    // crop empty; the recognizer expects a line image where text fills the
-    // frame, and a mostly-empty strip decodes to junk. Margin is half a line
-    // height so the glyphs keep a little breathing room.
-    let margin = (height / lines.max(1)) / 2;
-    let (processed, width) = trim_columns_to_content(&processed, width, height, margin);
-
-    // Re-pad the vertical frame toward the recognizer's training text-to-frame
-    // ratio. Only meaningful for the single-line crops (timestamp, shard); the
-    // multi-line block path stacks rows and would need per-row banding, so leave
-    // it untouched there.
-    let (processed, height) = if lines == 1 {
-        pad_rows_to_text_fraction(&processed, width, height, 0.62)
-    } else {
-        (processed, height)
-    };
-
-    // Upscale tiny regions toward a legible line height. At low resolutions a
-    // single shard/timestamp line can be ~13px tall, below what Tesseract reads
-    // reliably; scaling it up recovers the text. The factor targets a per-line
-    // height (the region stacks `lines` text rows) rather than blindly
-    // multiplying — over-upscaling blurs and hurts OCR.
-    const TARGET_LINE_HEIGHT: usize = 26;
-    let line_height = (height / lines.max(1)).max(1);
-    let factor = ((TARGET_LINE_HEIGHT + line_height / 2) / line_height).max(1);
-    if factor > 1 {
-        let new_w = width * factor;
-        let new_h = height * factor;
-        let upscaled = preprocess::upscale_bilinear(&processed, width, height, new_w, new_h);
-        return (upscaled, new_w, new_h);
-    }
-
-    (processed, width, height)
 }
 
 /// Client UI language, inferred from the stockpile type text.
@@ -1803,6 +1934,68 @@ mod tests {
         let (out, new_h) = pad_rows_to_text_fraction(&gray, 4, 6, 0.62);
         assert_eq!(new_h, 6);
         assert_eq!(out, gray);
+    }
+
+    #[test]
+    fn light_text_preset_skips_polarity_and_padding() {
+        // The type/name crop is already light-on-dark, so the light_text preset
+        // must not flip polarity or pad, and must scale continuously.
+        let params = PreprocessParams::light_text(0.5, 4.0);
+        assert!(!params.normalize_polarity);
+        assert_eq!(params.pad_fraction, None);
+        match params.upscale {
+            Upscale::Continuous { base, scale_factor } => {
+                assert_eq!(base, 4.0);
+                assert_eq!(scale_factor, 0.5);
+            }
+            Upscale::LineHeight => panic!("light_text must use a continuous upscale"),
+        }
+    }
+
+    #[test]
+    fn name_preset_trims_rows_and_pads() {
+        // The name line trims the tall blank band, then re-pads to the training
+        // ratio, but keeps the light_text polarity/upscale behavior.
+        let params = PreprocessParams::name(0.5, 4.0);
+        assert!(!params.normalize_polarity);
+        assert!(params.trim_rows);
+        assert_eq!(params.pad_fraction, Some(0.62));
+        assert!(matches!(params.upscale, Upscale::Continuous { .. }));
+    }
+
+    #[test]
+    fn trim_rows_crops_blank_band_to_text() {
+        // A 10-row strip with text only on rows 6..=7 trims down to the band plus
+        // a 1-row margin on each side (6-1 ..= 7+1 -> 4 rows).
+        let width = 4;
+        let height = 10;
+        let buf = buffer_with_text_rows(width, height, &[(6, 7)]);
+        let (out, new_h) = trim_rows_to_content(&buf, width, height, 1);
+        assert_eq!(new_h, 4);
+        assert_eq!(out.len(), width * 4);
+    }
+
+    #[test]
+    fn trim_rows_ignores_dim_speckle() {
+        // A lone dim pixel (value 120, below the >200 bright test) must not mark a
+        // row as text, so a strip with only dim noise is returned unchanged.
+        let width = 4;
+        let height = 6;
+        let mut buf = vec![0u8; width * height];
+        buf[1 * width] = 120; // dim speckle on row 1
+        let (out, new_h) = trim_rows_to_content(&buf, width, height, 0);
+        assert_eq!(new_h, height);
+        assert_eq!(out, buf);
+    }
+
+    #[test]
+    fn strip_preset_normalizes_and_pads() {
+        // The shard/timestamp strip must normalize polarity, pad single lines to
+        // the training text-to-frame ratio, and upscale toward a line height.
+        let params = PreprocessParams::strip();
+        assert!(params.normalize_polarity);
+        assert_eq!(params.pad_fraction, Some(0.62));
+        assert!(matches!(params.upscale, Upscale::LineHeight));
     }
 
     /// Build a grayscale buffer where the given inclusive row ranges are "text"
