@@ -1347,6 +1347,63 @@ fn trim_columns_to_content(
     (out, new_w)
 }
 
+/// Pad dark rows above and below the text so the bright text band occupies
+/// roughly `target_fraction` of the frame height.
+///
+/// The recognizer is trained on lines rendered at font sizes 28-48 inside a
+/// 64px frame, so glyphs fill ~45-75% of the height. An in-game timestamp/shard
+/// crop trims tight to the text (~80-100% of the strip height); once the
+/// recognizer resizes it to 64px the glyphs are proportionally larger than
+/// anything in the training set, which tips CJK markers like `分` into digit
+/// misreads (observed: `02时47分` decoded as `02时474`). Re-padding the vertical
+/// frame toward the training ratio brings the input back in-distribution.
+///
+/// Only ever pads (never crops): a no-op when the band already sits within the
+/// target fraction.
+fn pad_rows_to_text_fraction(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    target_fraction: f64,
+) -> (Vec<u8>, usize) {
+    if width == 0 || height == 0 {
+        return (gray.to_vec(), height);
+    }
+
+    // Same activity threshold as the column trim: ~a quarter of the autocontrast
+    // range marks a row as carrying text.
+    const TEXT_THRESHOLD: u8 = 64;
+
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    for y in 0..height {
+        let row = &gray[y * width..y * width + width];
+        if row.iter().copied().max().unwrap_or(0) >= TEXT_THRESHOLD {
+            first.get_or_insert(y);
+            last = y;
+        }
+    }
+
+    let Some(first) = first else {
+        return (gray.to_vec(), height);
+    };
+
+    let band = last - first + 1;
+    let desired = (band as f64 / target_fraction).round() as usize;
+    if desired <= height {
+        return (gray.to_vec(), height);
+    }
+
+    let pad = desired - height;
+    let top = pad / 2;
+    let bottom = pad - top;
+
+    let mut out = vec![0u8; width * top];
+    out.extend_from_slice(gray);
+    out.resize(out.len() + width * bottom, 0u8);
+    (out, desired)
+}
+
 fn autocontrast(gray: &mut [u8], cutoff_percent: u32) {
     if gray.is_empty() {
         return;
@@ -1438,6 +1495,16 @@ fn preprocess_for_shard(
     // height so the glyphs keep a little breathing room.
     let margin = (height / lines.max(1)) / 2;
     let (processed, width) = trim_columns_to_content(&processed, width, height, margin);
+
+    // Re-pad the vertical frame toward the recognizer's training text-to-frame
+    // ratio. Only meaningful for the single-line crops (timestamp, shard); the
+    // multi-line block path stacks rows and would need per-row banding, so leave
+    // it untouched there.
+    let (processed, height) = if lines == 1 {
+        pad_rows_to_text_fraction(&processed, width, height, 0.62)
+    } else {
+        (processed, height)
+    };
 
     // Upscale tiny regions toward a legible line height. At low resolutions a
     // single shard/timestamp line can be ~13px tall, below what Tesseract reads
@@ -1683,6 +1750,58 @@ mod tests {
         let gray = vec![40u8; 8 * 3];
         let (out, new_w) = trim_columns_to_content(&gray, 8, 3, 2);
         assert_eq!(new_w, 8);
+        assert_eq!(out, gray);
+    }
+
+    #[test]
+    fn pad_rows_expands_tight_crop_to_target_fraction() {
+        // 4-wide, 10-tall strip with text filling rows 0..=7 (band 8 = 80% of
+        // height). Targeting 50% must pad to height 16 (8 / 0.5) and keep the
+        // original rows intact, centred.
+        let width = 4;
+        let height = 10;
+        let gray = {
+            let mut g = vec![0u8; width * height];
+            for y in 0..8 {
+                g[y * width] = 255;
+            }
+            g
+        };
+        let (out, new_h) = pad_rows_to_text_fraction(&gray, width, height, 0.5);
+        assert_eq!(new_h, 16);
+        assert_eq!(out.len(), width * new_h);
+        // 6 padding rows split 3 top / 3 bottom: original rows land at 3..=12.
+        assert!(
+            out[..width * 3].iter().all(|&v| v == 0),
+            "top padding is dark"
+        );
+        assert_eq!(
+            out[3 * width],
+            255,
+            "first text row preserved after padding"
+        );
+    }
+
+    #[test]
+    fn pad_rows_is_noop_when_band_within_target() {
+        // Text band already only 40% of height (rows 3..=6 of 10): no padding.
+        let width = 4;
+        let height = 10;
+        let mut gray = vec![0u8; width * height];
+        for y in 3..=6 {
+            gray[y * width] = 255;
+        }
+        let (out, new_h) = pad_rows_to_text_fraction(&gray, width, height, 0.62);
+        assert_eq!(new_h, height);
+        assert_eq!(out, gray);
+    }
+
+    #[test]
+    fn pad_rows_leaves_blank_strip_unchanged() {
+        // No row clears the text threshold: return the input untouched.
+        let gray = vec![20u8; 4 * 6];
+        let (out, new_h) = pad_rows_to_text_fraction(&gray, 4, 6, 0.62);
+        assert_eq!(new_h, 6);
         assert_eq!(out, gray);
     }
 
