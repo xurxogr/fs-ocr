@@ -53,6 +53,32 @@ const TIME_MASK_CYRILLIC: &str =
 #[cfg(not(feature = "ocr-full"))]
 const TIME_MASK_CHINESE: &str = "0123456789,，日时分";
 
+/// Per-script masks for the stockpile-type region. The localized type strings
+/// are a closed vocabulary that never mixes scripts within one label, so each
+/// mask carries only its script's letters (plus space and the hyphen in
+/// "BMS - Longhook"). Decoding the region under one mask at a time keeps the
+/// read on-script — without this an English label like "Aircraft Depot" decodes
+/// with stray Cyrillic glyphs ("X'rcraft Dcьзr") and matches nothing. The Latin
+/// mask carries the accents the EN/DE/FR/PT names use (Dépôt, Torreão, …).
+#[cfg(not(feature = "ocr-full"))]
+const TYPE_MASK_LATIN: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz -àâãçèéíóôú";
+#[cfg(not(feature = "ocr-full"))]
+const TYPE_MASK_CYRILLIC: &str =
+    " АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя";
+#[cfg(not(feature = "ocr-full"))]
+const TYPE_MASK_CHINESE: &str = "营地要塞安全屋遗迹基堡边境城镇下仓库海港";
+
+/// Type-region decode cascade, tried in order. Latin first (the common client
+/// and the script most prone to cross-script intrusion), then Cyrillic, then
+/// Chinese; the first mask whose decode matches a known type wins, and its
+/// script tells us the client language for routing the shard/timestamp block.
+#[cfg(not(feature = "ocr-full"))]
+const TYPE_MASKS: &[(&str, ClientLanguage)] = &[
+    (TYPE_MASK_LATIN, ClientLanguage::English),
+    (TYPE_MASK_CYRILLIC, ClientLanguage::Russian),
+    (TYPE_MASK_CHINESE, ClientLanguage::Chinese),
+];
+
 /// Main scanning pipeline for stockpile screenshots.
 pub struct ScanPipeline {
     /// Template database path.
@@ -396,44 +422,33 @@ impl ScanPipeline {
         // route the shard/timestamp block to the right OCR model.
         let mut client_language = ClientLanguage::English;
         if let Some((x, y, w, h)) = regions.type_region {
-            if let Some(extractor) = &self.text_extractor {
-                let type_img = extract_region(
-                    image,
-                    width as usize,
-                    height as usize,
-                    x.max(0) as usize,
-                    y.max(0) as usize,
-                    w as usize,
-                    h as usize,
-                );
+            let type_img = extract_region(
+                image,
+                width as usize,
+                height as usize,
+                x.max(0) as usize,
+                y.max(0) as usize,
+                w as usize,
+                h as usize,
+            );
 
-                // Minimal preprocessing for OCR (no binarization for multilingual support)
-                let (processed, proc_w, proc_h) = preprocess_for_recognizer(
-                    &type_img,
-                    w as usize,
-                    h as usize,
-                    1,
-                    &PreprocessParams::light_text(scale_factor, 2.0),
-                );
+            // Minimal preprocessing for OCR (no binarization for multilingual support)
+            let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+                &type_img,
+                w as usize,
+                h as usize,
+                1,
+                &PreprocessParams::light_text(scale_factor, 2.0),
+            );
 
-                if debug_ocr::enabled() {
-                    debug_ocr::save_gray("type", &processed, proc_w, proc_h);
-                }
-
-                if let Ok(text) = extractor.extract_text(
-                    &processed,
-                    proc_w as i32,
-                    proc_h as i32,
-                    1, // grayscale
-                ) {
-                    if debug_ocr::enabled() {
-                        eprintln!("[FS_DEBUG_OCR] type region raw text: {:?}", text);
-                    }
-                    client_language = ClientLanguage::detect(&text);
-                    let stockpile_type = StockpileType::from_string(&text);
-                    stockpile.stockpile_type = stockpile_type;
-                }
+            if debug_ocr::enabled() {
+                debug_ocr::save_gray("type", &processed, proc_w, proc_h);
             }
+
+            let (stockpile_type, lang) =
+                self.recognize_type_text(&processed, proc_w as i32, proc_h as i32);
+            client_language = lang;
+            stockpile.stockpile_type = stockpile_type;
         }
 
         // Extract shard and ingame timestamp. The region holds 2 lines:
@@ -609,6 +624,67 @@ impl ScanPipeline {
                     break;
                 }
             }
+        }
+    }
+
+    /// Recognize the stockpile type and infer the client language from a
+    /// preprocessed type-region crop.
+    ///
+    /// ocrs (default): decode the region under each script mask in [`TYPE_MASKS`]
+    /// in turn (Latin, then Cyrillic, then Chinese) and return the first that
+    /// matches a known type, along with that script's client language. Masking
+    /// keeps each pass on-script so a clean Latin label isn't lost to a stray
+    /// Cyrillic homoglyph. If no mask yields a known type, the type is
+    /// `Undefined` and the language defaults to English (Latin routing).
+    #[cfg(not(feature = "ocr-full"))]
+    fn recognize_type_text(
+        &self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+    ) -> (StockpileType, ClientLanguage) {
+        for &(mask, lang) in TYPE_MASKS {
+            let Ok(text) = self.extract_with_mask(mask, image, width, height) else {
+                continue;
+            };
+            if debug_ocr::enabled() {
+                eprintln!(
+                    "[FS_DEBUG_OCR] type region ({:?} mask) raw text: {:?}",
+                    lang, text
+                );
+            }
+            let stockpile_type = StockpileType::from_string(&text);
+            if stockpile_type != StockpileType::Undefined {
+                return (stockpile_type, lang);
+            }
+        }
+        (StockpileType::Undefined, ClientLanguage::English)
+    }
+
+    /// Tesseract (`ocr-full`): read the region as one multilingual block and
+    /// classify the type and client language from that single decode. Tesseract
+    /// has no decode masks, so the per-script cascade does not apply.
+    #[cfg(feature = "ocr-full")]
+    fn recognize_type_text(
+        &self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+    ) -> (StockpileType, ClientLanguage) {
+        let Some(extractor) = &self.text_extractor else {
+            return (StockpileType::Undefined, ClientLanguage::English);
+        };
+        match extractor.extract_text(image, width, height, 1) {
+            Ok(text) => {
+                if debug_ocr::enabled() {
+                    eprintln!("[FS_DEBUG_OCR] type region raw text: {:?}", text);
+                }
+                (
+                    StockpileType::from_string(&text),
+                    ClientLanguage::detect(&text),
+                )
+            }
+            Err(_) => (StockpileType::Undefined, ClientLanguage::English),
         }
     }
 
@@ -1284,38 +1360,42 @@ enum Upscale {
     LineHeight,
 }
 
-/// The per-field knobs that distinguish one recognizer input from another. The
-/// pipeline itself (luma -> autocontrast -> [polarity] -> [trim_rows] ->
-/// trim_columns -> [pad] -> upscale) is shared; these toggles select the
-/// optional steps.
+/// Vertical text-to-frame ratio every single-line recognizer crop is padded to.
+/// The model is trained on this exact framing, so the training generator
+/// (`training/generate_dataset.py`) MUST render at the same value — keep the two
+/// in sync or the recognizer sees text at a scale it never learned.
+const TEXT_FRAME_RATIO: f64 = 0.60;
+
+/// Horizontal quiet zone added on each side of the text, as a fraction of the
+/// text-band height. Small but non-zero: a tight crop removes the variable blank
+/// margin (which the recognizer otherwise reads as a phantom edge glyph — e.g.
+/// the doubled leading `V` in `VVELI`), and this constant adds back just enough
+/// uniform breathing room. The generator renders the same quiet zone.
+const QUIET_ZONE_RATIO: f64 = 0.15;
+
+/// Floor for the quiet zone (px), so tiny crops still keep a 2px margin.
+const MIN_QUIET_ZONE: usize = 2;
+
+/// A row/column carries ink when its luma range (max − min) clears this; ~a
+/// quarter of the full 0..=255 range that autocontrast stretches to. Used by
+/// both the column trim and the canonical single-line framing, and polarity-
+/// agnostic by construction (it keys off contrast, not absolute brightness).
+const ACTIVITY_THRESHOLD: u8 = 64;
+
+/// The only per-field difference left in the recognizer input: how the canonical
+/// frame is scaled up toward a legible size. Everything else — luma, autocontrast,
+/// polarity normalization, the tight-crop-then-pad framing — is identical across
+/// type, name, shard, and timestamp so a single canonical preprocessing serves
+/// every field (and, modulo a final polarity flip, either OCR backend).
 struct PreprocessParams {
-    /// Flip to light-on-dark when the post-autocontrast mean is bright. The
-    /// recognizer is trained light-on-dark, so a dark-on-light strip must be
-    /// inverted or it decodes to junk.
-    normalize_polarity: bool,
-    /// Crop blank top/bottom rows down to the text band. The name detection box
-    /// can be much taller than the text (the glyphs sit bottom-aligned in a tall
-    /// frame), and the recognizer resizes the whole frame to a fixed height —
-    /// leaving the empty band in shrinks the glyphs out of distribution.
-    trim_rows: bool,
-    /// When `Some(frac)` and the crop is a single line, pad dark rows so the
-    /// text band fills ~`frac` of the frame height (matching the training
-    /// text-to-frame ratio).
-    pad_fraction: Option<f64>,
-    /// How to scale the trimmed crop up toward a legible size for the model.
     upscale: Upscale,
 }
 
 impl PreprocessParams {
-    /// Light-on-dark banner/line (type, name). The crop is already bright text
-    /// on a dark background, so no polarity flip and no vertical padding; scale
-    /// continuously by `upscale_base / scale_factor` (2.0 for the type banner,
-    /// 4.0 for the smaller name line).
+    /// Type/name banner line: scale continuously by `upscale_base / scale_factor`
+    /// (2.0 for the type banner, 4.0 for the smaller name line).
     fn light_text(scale_factor: f64, upscale_base: f64) -> Self {
         Self {
-            normalize_polarity: false,
-            trim_rows: false,
-            pad_fraction: None,
             upscale: Upscale::Continuous {
                 base: upscale_base,
                 scale_factor,
@@ -1323,30 +1403,15 @@ impl PreprocessParams {
         }
     }
 
-    /// Stockpile name line. Like [`light_text`](Self::light_text) but trims the
-    /// blank vertical band (the name box is often far taller than the glyphs,
-    /// which sit bottom-aligned) and then re-pads to the training text-to-frame
-    /// ratio, so the glyphs reach the recognizer at the scale it was trained on.
+    /// Stockpile name line. Same canonical framing as every other field; named
+    /// for call-site clarity.
     fn name(scale_factor: f64, upscale_base: f64) -> Self {
-        Self {
-            normalize_polarity: false,
-            trim_rows: true,
-            pad_fraction: Some(0.62),
-            upscale: Upscale::Continuous {
-                base: upscale_base,
-                scale_factor,
-            },
-        }
+        Self::light_text(scale_factor, upscale_base)
     }
 
-    /// Shard/timestamp strip. The strip can render dark-on-light depending on
-    /// the UI theme, so normalize polarity; pad single-line crops toward the
-    /// training text-to-frame ratio; upscale toward a legible per-line height.
+    /// Shard/timestamp strip: upscale toward a legible per-line height.
     fn strip() -> Self {
         Self {
-            normalize_polarity: true,
-            trim_rows: false,
-            pad_fraction: Some(0.62),
             upscale: Upscale::LineHeight,
         }
     }
@@ -1377,41 +1442,32 @@ fn preprocess_for_recognizer(
     // full dynamic range.
     autocontrast(&mut processed, 2);
 
-    // Normalize polarity to light-on-dark. After autocontrast the background
-    // dominates one extreme, so a bright mean means dark-text-on-light: flip it.
-    if params.normalize_polarity {
-        let mean: u32 =
-            processed.iter().map(|&v| v as u32).sum::<u32>() / processed.len().max(1) as u32;
-        if mean > 127 {
-            for v in processed.iter_mut() {
-                *v = 255 - *v;
-            }
+    // Normalize polarity to light-on-dark. The recognizer is trained light-on-
+    // dark; an in-game theme can render any field dark-on-light, which decodes to
+    // junk if fed uninverted. After autocontrast the background dominates one
+    // extreme, so a bright mean means dark-text-on-light: flip it.
+    let mean: u32 =
+        processed.iter().map(|&v| v as u32).sum::<u32>() / processed.len().max(1) as u32;
+    if mean > 127 {
+        for v in processed.iter_mut() {
+            *v = 255 - *v;
         }
     }
 
-    // Trim the blank vertical band down to the text rows. The name box is often
-    // much taller than the glyphs (which sit bottom-aligned), and the recognizer
-    // resizes the whole frame to a fixed height; without this the glyphs arrive
-    // shrunk out of the training distribution and decode to junk.
-    let (processed, height) = if params.trim_rows && lines == 1 {
-        let margin = (height / lines.max(1)) / 8;
-        trim_rows_to_content(&processed, width, height, margin)
+    // Canonical framing. A single line is tight-cropped to its ink bbox on both
+    // axes and re-padded to TEXT_FRAME_RATIO with a quiet zone — the exact frame
+    // the model is trained on, and free of the variable blank margin the
+    // detection box carries (which the recognizer otherwise reads as a phantom
+    // edge glyph). A multi-line strip keeps its stacked rows; only the horizontal
+    // margin is tightened, since per-row vertical banding isn't meaningful across
+    // stacked lines.
+    let (processed, width, height) = if lines == 1 {
+        fit_single_line_frame(&processed, width, height)
     } else {
-        (processed, height)
-    };
-
-    // Trim blank left/right margins down to the text extent before scaling. The
-    // detection box is padded, so a wide empty crop otherwise decodes a spurious
-    // leading glyph. A margin of half a line height keeps breathing room.
-    let margin = (height / lines.max(1)) / 2;
-    let (processed, width) = trim_columns_to_content(&processed, width, height, margin);
-
-    // Re-pad the vertical frame toward the recognizer's training text-to-frame
-    // ratio. Single-line only: a multi-line block stacks rows and would need
-    // per-row banding, so leave it untouched there.
-    let (processed, height) = match params.pad_fraction {
-        Some(frac) if lines == 1 => pad_rows_to_text_fraction(&processed, width, height, frac),
-        _ => (processed, height),
+        let band_h = (height / lines.max(1)).max(1);
+        let qz = (((band_h as f64) * QUIET_ZONE_RATIO).round() as usize).max(MIN_QUIET_ZONE);
+        let (cropped, new_w) = trim_columns_to_content(&processed, width, height, qz);
+        (cropped, new_w, height)
     };
 
     apply_upscale(processed, width, height, lines, &params.upscale)
@@ -1477,9 +1533,6 @@ fn trim_columns_to_content(
         return (gray.to_vec(), width);
     }
 
-    // 64 ≈ a quarter of the full 0..=255 range that autocontrast stretches to.
-    const ACTIVITY_THRESHOLD: u8 = 64;
-
     let mut first: Option<usize> = None;
     let mut last = 0usize;
     for x in 0..width {
@@ -1511,103 +1564,73 @@ fn trim_columns_to_content(
     (out, new_w)
 }
 
-/// Crop blank top/bottom rows of a single-line grayscale strip down to the text
-/// band (plus `margin` rows of breathing room on each side).
+/// Crop a single-line grayscale crop tight to its ink bounding box on both axes,
+/// then re-pad to the canonical frame: a horizontal quiet zone of
+/// [`QUIET_ZONE_RATIO`] × band-height on each side, and top/bottom padding so the
+/// text band fills [`TEXT_FRAME_RATIO`] of the height. Background is dark (0)
+/// after polarity normalization, so padding is dark.
 ///
-/// A row is "text" if it holds a bright pixel (> 200; the input is light-on-dark
-/// after autocontrast and any polarity flip). The `> 200` test ignores the dim
-/// speckle noise that fills the empty band of an unpinned name crop, so a few
-/// stray pixels don't defeat the trim. If no row clears the threshold (a blank
-/// strip), the input is returned unchanged rather than cropped to nothing.
-fn trim_rows_to_content(
-    gray: &[u8],
-    width: usize,
-    height: usize,
-    margin: usize,
-) -> (Vec<u8>, usize) {
+/// This is the heart of the shared preprocessing: it strips the variable blank
+/// margin the detection box carries (which the recognizer otherwise reads as a
+/// phantom leading/trailing glyph — the doubled `V` in `VVELI`) and presents
+/// every field at the one constant scale and framing the model is trained on.
+///
+/// Ink is detected by per-row / per-column luma *range* (max − min ≥
+/// [`ACTIVITY_THRESHOLD`]), which is polarity-agnostic. A genuinely blank crop
+/// (no row or column clears the threshold) is returned unchanged rather than
+/// cropped to nothing.
+fn fit_single_line_frame(gray: &[u8], width: usize, height: usize) -> (Vec<u8>, usize, usize) {
     if width == 0 || height == 0 {
-        return (gray.to_vec(), height);
+        return (gray.to_vec(), width, height);
     }
 
-    const BRIGHT: u8 = 200;
-
-    let mut first: Option<usize> = None;
-    let mut last = 0usize;
-    for y in 0..height {
-        let row = &gray[y * width..y * width + width];
-        if row.iter().any(|&v| v > BRIGHT) {
-            first.get_or_insert(y);
-            last = y;
+    // Columns carrying ink (large vertical luma range).
+    let mut x_first: Option<usize> = None;
+    let mut x_last = 0usize;
+    for x in 0..width {
+        let (mut min, mut max) = (255u8, 0u8);
+        for y in 0..height {
+            let v = gray[y * width + x];
+            min = min.min(v);
+            max = max.max(v);
+        }
+        if max - min >= ACTIVITY_THRESHOLD {
+            x_first.get_or_insert(x);
+            x_last = x;
         }
     }
 
-    let Some(first) = first else {
-        return (gray.to_vec(), height);
-    };
-
-    let lo = first.saturating_sub(margin);
-    let hi = (last + margin + 1).min(height);
-    let new_h = hi - lo;
-
-    let out = gray[lo * width..hi * width].to_vec();
-    (out, new_h)
-}
-
-/// Pad dark rows above and below the text so the bright text band occupies
-/// roughly `target_fraction` of the frame height.
-///
-/// The recognizer is trained on lines rendered at font sizes 28-48 inside a
-/// 64px frame, so glyphs fill ~45-75% of the height. An in-game timestamp/shard
-/// crop trims tight to the text (~80-100% of the strip height); once the
-/// recognizer resizes it to 64px the glyphs are proportionally larger than
-/// anything in the training set, which tips CJK markers like `分` into digit
-/// misreads (observed: `02时47分` decoded as `02时474`). Re-padding the vertical
-/// frame toward the training ratio brings the input back in-distribution.
-///
-/// Only ever pads (never crops): a no-op when the band already sits within the
-/// target fraction.
-fn pad_rows_to_text_fraction(
-    gray: &[u8],
-    width: usize,
-    height: usize,
-    target_fraction: f64,
-) -> (Vec<u8>, usize) {
-    if width == 0 || height == 0 {
-        return (gray.to_vec(), height);
-    }
-
-    // Same activity threshold as the column trim: ~a quarter of the autocontrast
-    // range marks a row as carrying text.
-    const TEXT_THRESHOLD: u8 = 64;
-
-    let mut first: Option<usize> = None;
-    let mut last = 0usize;
+    // Rows carrying ink (large horizontal luma range).
+    let mut y_first: Option<usize> = None;
+    let mut y_last = 0usize;
     for y in 0..height {
         let row = &gray[y * width..y * width + width];
-        if row.iter().copied().max().unwrap_or(0) >= TEXT_THRESHOLD {
-            first.get_or_insert(y);
-            last = y;
+        let min = row.iter().copied().min().unwrap_or(0);
+        let max = row.iter().copied().max().unwrap_or(0);
+        if max - min >= ACTIVITY_THRESHOLD {
+            y_first.get_or_insert(y);
+            y_last = y;
         }
     }
 
-    let Some(first) = first else {
-        return (gray.to_vec(), height);
+    let (Some(x0), Some(y0)) = (x_first, y_first) else {
+        return (gray.to_vec(), width, height);
     };
+    let band_w = x_last - x0 + 1;
+    let band_h = y_last - y0 + 1;
 
-    let band = last - first + 1;
-    let desired = (band as f64 / target_fraction).round() as usize;
-    if desired <= height {
-        return (gray.to_vec(), height);
+    let quiet = (((band_h as f64) * QUIET_ZONE_RATIO).round() as usize).max(MIN_QUIET_ZONE);
+    let desired_h = (((band_h as f64) / TEXT_FRAME_RATIO).round() as usize).max(band_h);
+    let top = (desired_h - band_h) / 2;
+    let new_w = band_w + 2 * quiet;
+
+    let mut out = vec![0u8; new_w * desired_h];
+    for ry in 0..band_h {
+        let src = (y0 + ry) * width + x0;
+        let dst = (top + ry) * new_w + quiet;
+        out[dst..dst + band_w].copy_from_slice(&gray[src..src + band_w]);
     }
-
-    let pad = desired - height;
-    let top = pad / 2;
-    let bottom = pad - top;
-
-    let mut out = vec![0u8; width * top];
-    out.extend_from_slice(gray);
-    out.resize(out.len() + width * bottom, 0u8);
-    (out, desired)
+    (out, new_w, desired_h)
 }
 
 fn autocontrast(gray: &mut [u8], cutoff_percent: u32) {
@@ -1672,6 +1695,12 @@ impl ClientLanguage {
     ///
     /// CJK ideographs imply the Chinese client; Cyrillic implies the Russian
     /// client; anything else is treated as a Latin (English) client.
+    ///
+    /// Only the Tesseract backend uses this: it reads the type region as one
+    /// multilingual block and infers the script from the decoded text. The ocrs
+    /// backend instead learns the language from which [`TYPE_MASKS`] entry
+    /// matched, so this is dead code there.
+    #[cfg_attr(not(feature = "ocr-full"), allow(dead_code))]
     fn detect(text: &str) -> Self {
         let has_cjk = text.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
         if has_cjk {
@@ -1885,117 +1914,67 @@ mod tests {
     }
 
     #[test]
-    fn pad_rows_expands_tight_crop_to_target_fraction() {
-        // 4-wide, 10-tall strip with text filling rows 0..=7 (band 8 = 80% of
-        // height). Targeting 50% must pad to height 16 (8 / 0.5) and keep the
-        // original rows intact, centred.
-        let width = 4;
-        let height = 10;
-        let gray = {
-            let mut g = vec![0u8; width * height];
-            for y in 0..8 {
-                g[y * width] = 255;
+    fn fit_frame_crops_to_ink_and_pads_to_ratio() {
+        // 12-wide, 12-tall crop with a high-contrast 2x2 ink block at rows 5..=6,
+        // cols 4..=5 (band 2x2). Expect: tight to the 2x2, quiet zone =
+        // max(2, round(2*0.15)) = 2 px each side -> width 2 + 4 = 6; vertical pad
+        // to round(2 / 0.60) = 3 rows tall, band centred (1 row top pad).
+        let width = 12;
+        let height = 12;
+        let mut gray = vec![0u8; width * height];
+        for y in 5..=6 {
+            for x in 4..=5 {
+                gray[y * width + x] = 255;
             }
-            g
-        };
-        let (out, new_h) = pad_rows_to_text_fraction(&gray, width, height, 0.5);
-        assert_eq!(new_h, 16);
-        assert_eq!(out.len(), width * new_h);
-        // 6 padding rows split 3 top / 3 bottom: original rows land at 3..=12.
+        }
+        let (out, new_w, new_h) = fit_single_line_frame(&gray, width, height);
+        assert_eq!(
+            (new_w, new_h),
+            (6, 3),
+            "tight crop + quiet zone + ratio pad"
+        );
+        assert_eq!(out.len(), new_w * new_h);
+        // desired_h = round(2/0.60) = 3, top pad = (3-2)/2 = 0: the single pad row
+        // lands at the bottom. Ink sits inside the 2px quiet zone (cols 2..=3).
         assert!(
-            out[..width * 3].iter().all(|&v| v == 0),
-            "top padding is dark"
+            out[2 * new_w..].iter().all(|&v| v == 0),
+            "bottom row is dark padding"
         );
         assert_eq!(
-            out[3 * width],
-            255,
-            "first text row preserved after padding"
+            out[2], 255,
+            "ink starts inside the quiet zone on the first row"
         );
     }
 
     #[test]
-    fn pad_rows_is_noop_when_band_within_target() {
-        // Text band already only 40% of height (rows 3..=6 of 10): no padding.
-        let width = 4;
-        let height = 10;
-        let mut gray = vec![0u8; width * height];
-        for y in 3..=6 {
-            gray[y * width] = 255;
-        }
-        let (out, new_h) = pad_rows_to_text_fraction(&gray, width, height, 0.62);
-        assert_eq!(new_h, height);
+    fn fit_frame_leaves_blank_crop_unchanged() {
+        // No column/row clears the activity threshold: return the input untouched
+        // rather than cropping to nothing.
+        let gray = vec![20u8; 8 * 6];
+        let (out, new_w, new_h) = fit_single_line_frame(&gray, 8, 6);
+        assert_eq!((new_w, new_h), (8, 6));
         assert_eq!(out, gray);
     }
 
     #[test]
-    fn pad_rows_leaves_blank_strip_unchanged() {
-        // No row clears the text threshold: return the input untouched.
-        let gray = vec![20u8; 4 * 6];
-        let (out, new_h) = pad_rows_to_text_fraction(&gray, 4, 6, 0.62);
-        assert_eq!(new_h, 6);
-        assert_eq!(out, gray);
-    }
-
-    #[test]
-    fn light_text_preset_skips_polarity_and_padding() {
-        // The type/name crop is already light-on-dark, so the light_text preset
-        // must not flip polarity or pad, and must scale continuously.
-        let params = PreprocessParams::light_text(0.5, 4.0);
-        assert!(!params.normalize_polarity);
-        assert_eq!(params.pad_fraction, None);
-        match params.upscale {
+    fn presets_share_canonical_framing_and_differ_only_in_upscale() {
+        // Every field flows through the one canonical preprocessing; the only
+        // per-field knob left is the upscale strategy.
+        match PreprocessParams::light_text(0.5, 4.0).upscale {
             Upscale::Continuous { base, scale_factor } => {
-                assert_eq!(base, 4.0);
-                assert_eq!(scale_factor, 0.5);
+                assert_eq!((base, scale_factor), (4.0, 0.5));
             }
             Upscale::LineHeight => panic!("light_text must use a continuous upscale"),
         }
-    }
-
-    #[test]
-    fn name_preset_trims_rows_and_pads() {
-        // The name line trims the tall blank band, then re-pads to the training
-        // ratio, but keeps the light_text polarity/upscale behavior.
-        let params = PreprocessParams::name(0.5, 4.0);
-        assert!(!params.normalize_polarity);
-        assert!(params.trim_rows);
-        assert_eq!(params.pad_fraction, Some(0.62));
-        assert!(matches!(params.upscale, Upscale::Continuous { .. }));
-    }
-
-    #[test]
-    fn trim_rows_crops_blank_band_to_text() {
-        // A 10-row strip with text only on rows 6..=7 trims down to the band plus
-        // a 1-row margin on each side (6-1 ..= 7+1 -> 4 rows).
-        let width = 4;
-        let height = 10;
-        let buf = buffer_with_text_rows(width, height, &[(6, 7)]);
-        let (out, new_h) = trim_rows_to_content(&buf, width, height, 1);
-        assert_eq!(new_h, 4);
-        assert_eq!(out.len(), width * 4);
-    }
-
-    #[test]
-    fn trim_rows_ignores_dim_speckle() {
-        // A lone dim pixel (value 120, below the >200 bright test) must not mark a
-        // row as text, so a strip with only dim noise is returned unchanged.
-        let width = 4;
-        let height = 6;
-        let mut buf = vec![0u8; width * height];
-        buf[1 * width] = 120; // dim speckle on row 1
-        let (out, new_h) = trim_rows_to_content(&buf, width, height, 0);
-        assert_eq!(new_h, height);
-        assert_eq!(out, buf);
-    }
-
-    #[test]
-    fn strip_preset_normalizes_and_pads() {
-        // The shard/timestamp strip must normalize polarity, pad single lines to
-        // the training text-to-frame ratio, and upscale toward a line height.
-        let params = PreprocessParams::strip();
-        assert!(params.normalize_polarity);
-        assert_eq!(params.pad_fraction, Some(0.62));
-        assert!(matches!(params.upscale, Upscale::LineHeight));
+        // name is just a clarity alias for light_text.
+        assert!(matches!(
+            PreprocessParams::name(0.5, 4.0).upscale,
+            Upscale::Continuous { .. }
+        ));
+        assert!(matches!(
+            PreprocessParams::strip().upscale,
+            Upscale::LineHeight
+        ));
     }
 
     /// Build a grayscale buffer where the given inclusive row ranges are "text"
