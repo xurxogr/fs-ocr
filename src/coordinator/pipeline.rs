@@ -546,13 +546,24 @@ impl ScanPipeline {
                 }
             }
 
-            stockpile.is_reserved = match &stockpile.name {
-                None => false,
-                Some(n) => {
-                    let trimmed = n.trim();
-                    !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("public")
-                }
-            };
+            // A public stockpile carries the game's localized default label
+            // ("Public"/"Público"/"Öffentlich"); only a different, non-empty name
+            // is a user-chosen reserve. Match the default fuzzily so an OCR
+            // misread of it (l/I, dropped accent) still reads as public, then
+            // normalize it to the canonical label so callers see one spelling.
+            let has_name = stockpile
+                .name
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|n| !n.is_empty());
+            let is_public_default = stockpile
+                .name
+                .as_deref()
+                .is_some_and(is_public_default_name);
+            if is_public_default {
+                stockpile.name = Some(PUBLIC_CANONICAL_NAME.to_string());
+            }
+            stockpile.is_reserved = has_name && !is_public_default;
         }
 
         Ok(())
@@ -572,6 +583,7 @@ impl ScanPipeline {
     ///   single line. ocrs is Latin-only, so CJK/Cyrillic clients are out of
     ///   scope for this backend regardless.
     #[cfg(feature = "ocr-full")]
+    #[allow(clippy::too_many_arguments)] // shared call site requires a uniform signature with the ocrs variant
     fn read_shard_region(
         &self,
         image: &[u8],
@@ -716,6 +728,7 @@ impl ScanPipeline {
     /// half-crops, each with a decode mask: the timestamp uses the client's
     /// script mask, the shard the fixed Latin shard mask.
     #[cfg(not(feature = "ocr-full"))]
+    #[allow(clippy::too_many_arguments)] // shared call site requires a uniform signature with the ocr-full variant
     fn read_shard_region(
         &self,
         image: &[u8],
@@ -1369,7 +1382,7 @@ const TEXT_FRAME_RATIO: f64 = 0.60;
 /// Horizontal quiet zone added on each side of the text, as a fraction of the
 /// text-band height. Small but non-zero: a tight crop removes the variable blank
 /// margin (which the recognizer otherwise reads as a phantom edge glyph — e.g.
-/// the doubled leading `V` in `VVELI`), and this constant adds back just enough
+/// the doubled leading `O` in `OORCA`), and this constant adds back just enough
 /// uniform breathing room. The generator renders the same quiet zone.
 const QUIET_ZONE_RATIO: f64 = 0.15;
 
@@ -1572,13 +1585,91 @@ fn trim_columns_to_content(
 ///
 /// This is the heart of the shared preprocessing: it strips the variable blank
 /// margin the detection box carries (which the recognizer otherwise reads as a
-/// phantom leading/trailing glyph — the doubled `V` in `VVELI`) and presents
+/// phantom leading/trailing glyph — the doubled `O` in `OORCA`) and presents
 /// every field at the one constant scale and framing the model is trained on.
 ///
 /// Ink is detected by per-row / per-column luma *range* (max − min ≥
 /// [`ACTIVITY_THRESHOLD`]), which is polarity-agnostic. A genuinely blank crop
 /// (no row or column clears the threshold) is returned unchanged rather than
 /// cropped to nothing.
+///
+/// The type region is cropped tight to its text slab upstream (in the detector),
+/// so its crop is already text-only. The name region's layout varies
+/// (pinned/unpinned/old-format) and can still carry a stray bright band, so the
+/// vertical extent is taken from [`dominant_text_band`] — the brightest
+/// contiguous stroke run — rather than a plain first..last span that a detached
+/// band would inflate.
+///
+/// Fraction of the crop's peak brightness a pixel must reach to count as a text
+/// stroke. Strokes are near-white after autocontrast + polarity normalization; a
+/// dim noise gradient stays mid-grey and never clears this.
+const INK_PIXEL_RATIO: f64 = 0.55;
+
+/// Find the vertical [first, last] row span of the actual text line.
+///
+/// Assumes light-on-dark (the framing runs after polarity normalization). A row
+/// belongs to the text when it carries bright *stroke* pixels (value ≥
+/// [`INK_PIXEL_RATIO`] × the crop's peak); this is true even for ascender/cap
+/// rows whose strokes are thin (low row mean) but bright, so they are kept — and
+/// false for a dim noise gradient bleeding into the crop, which has no near-white
+/// pixels and so forms a separate, non-inked gap. Among the contiguous inked runs
+/// the one carrying the most stroke pixels wins, dropping a detached noise band;
+/// the chosen run is then grown across any row that still carries a stroke pixel,
+/// so thin cap/ascender tips and descender tails aren't clipped.
+/// Returns `None` when no row carries ink (a blank crop).
+fn dominant_text_band(gray: &[u8], width: usize, height: usize) -> Option<(usize, usize)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let peak = gray.iter().copied().max().unwrap_or(0);
+    if peak == 0 {
+        return None;
+    }
+    let ink_level = (peak as f64 * INK_PIXEL_RATIO).round() as u8;
+    // A handful of bright pixels marks a real stroke row while ignoring isolated
+    // sensor speckle; scales gently with width so it works at every resolution.
+    let min_ink = (width / 128).max(2);
+
+    let row_ink = |y: usize| -> usize {
+        gray[y * width..y * width + width]
+            .iter()
+            .filter(|&&v| v >= ink_level)
+            .count()
+    };
+
+    let mut best: Option<(usize, usize)> = None;
+    let mut best_energy = 0usize;
+    let mut run_start: Option<usize> = None;
+    let mut run_energy = 0usize;
+    for y in 0..=height {
+        let ink = if y < height { row_ink(y) } else { 0 };
+        if ink >= min_ink {
+            run_start.get_or_insert(y);
+            run_energy += ink;
+        } else if let Some(start) = run_start.take() {
+            if run_energy > best_energy {
+                best_energy = run_energy;
+                best = Some((start, y - 1));
+            }
+            run_energy = 0;
+        }
+    }
+
+    // Grow the chosen run across any row that still carries a stroke pixel, so a
+    // cap/ascender tip or descender tail (one or two bright pixels, below
+    // `min_ink`) isn't clipped. The noise band has no near-white pixels, so this
+    // stops at the blank gap before it rather than swallowing it.
+    let (mut y0, mut y1) = best?;
+    while y0 > 0 && row_ink(y0 - 1) >= 1 {
+        y0 -= 1;
+    }
+    while y1 + 1 < height && row_ink(y1 + 1) >= 1 {
+        y1 += 1;
+    }
+    Some((y0, y1))
+}
+
 fn fit_single_line_frame(gray: &[u8], width: usize, height: usize) -> (Vec<u8>, usize, usize) {
     if width == 0 || height == 0 {
         return (gray.to_vec(), width, height);
@@ -1600,20 +1691,12 @@ fn fit_single_line_frame(gray: &[u8], width: usize, height: usize) -> (Vec<u8>, 
         }
     }
 
-    // Rows carrying ink (large horizontal luma range).
-    let mut y_first: Option<usize> = None;
-    let mut y_last = 0usize;
-    for y in 0..height {
-        let row = &gray[y * width..y * width + width];
-        let min = row.iter().copied().min().unwrap_or(0);
-        let max = row.iter().copied().max().unwrap_or(0);
-        if max - min >= ACTIVITY_THRESHOLD {
-            y_first.get_or_insert(y);
-            y_last = y;
-        }
-    }
-
-    let (Some(x0), Some(y0)) = (x_first, y_first) else {
+    // Vertical extent: the brightest contiguous stroke run, so a stray bright
+    // band in a variable-layout name crop doesn't inflate the frame.
+    let Some((y0, y_last)) = dominant_text_band(gray, width, height) else {
+        return (gray.to_vec(), width, height);
+    };
+    let Some(x0) = x_first else {
         return (gray.to_vec(), width, height);
     };
     let band_w = x_last - x0 + 1;
@@ -1727,6 +1810,40 @@ impl ClientLanguage {
 /// Known shard names. The shard-name crop is a single Latin word.
 const KNOWN_SHARDS: [&str; 4] = ["ABLE", "CHARLIE", "LIVE", "Devbranch"];
 
+/// Localized game labels for the default (non-custom) *public* stockpile name,
+/// lowercased for comparison. A name region that reads as one of these is the
+/// game's auto label for a public stockpile, not a user-chosen reserve name.
+///
+/// Latin scripts only (English/French share `public`): the recognizer's charset
+/// no longer carries Chinese or Cyrillic, so it can never emit `公共` /
+/// `Публичный` — those would be permanently-dead entries that falsely imply
+/// support we've dropped.
+const PUBLIC_DEFAULT_NAMES: &[&str] = &["public", "público", "öffentlich"];
+
+/// Canonical label stored when a name matches a public default, regardless of
+/// the client's language or the OCR noise that reached us.
+const PUBLIC_CANONICAL_NAME: &str = "Public";
+
+/// Whether an OCR'd name is the localized public default rather than a custom
+/// reserve name.
+///
+/// Matched fuzzily so the geometric game font's `l`/`I` collision (e.g. `Public`
+/// read as `PubIic`) and a dropped accent (`Público` → `Publico`) still resolve.
+/// The `0.80` floor accepts ~one edit on the shortest entry (`public`, 6 chars:
+/// one substitution scores `1 - 1/6 ≈ 0.83`) while staying tight enough that an
+/// arbitrary custom name never collapses into the default.
+fn is_public_default_name(name: &str) -> bool {
+    const MIN_SIMILARITY: f64 = 0.80;
+
+    let candidate = name.trim().to_lowercase();
+    if candidate.is_empty() {
+        return false;
+    }
+    PUBLIC_DEFAULT_NAMES
+        .iter()
+        .any(|&default| crate::text_utils::similarity(&candidate, default) >= MIN_SIMILARITY)
+}
+
 /// Match OCR'd shard text to the closest known shard name.
 ///
 /// At low resolutions OCR garbles a character or two (e.g. "Devbranch" reads as
@@ -1801,6 +1918,39 @@ mod tests {
         assert_eq!(match_shard_name(""), None);
         assert_eq!(match_shard_name("   "), None);
         assert_eq!(match_shard_name("Public"), None);
+    }
+
+    #[test]
+    fn public_default_matches_localized_labels() {
+        // English/French, Portuguese, German defaults all read as public.
+        assert!(is_public_default_name("Public"));
+        assert!(is_public_default_name("público"));
+        assert!(is_public_default_name("Öffentlich"));
+    }
+
+    #[test]
+    fn public_default_tolerates_ocr_noise() {
+        // The geometric-font l/I collision and a dropped accent must still match.
+        assert!(is_public_default_name("PubIic")); // l read as capital I
+        assert!(is_public_default_name("Publico")); // ó read without the accent
+        assert!(is_public_default_name("  Public  ")); // surrounding whitespace
+    }
+
+    #[test]
+    fn public_default_rejects_custom_and_empty_names() {
+        assert!(!is_public_default_name("ABC DEF GH"));
+        assert!(!is_public_default_name("ORCA-THR-C"));
+        assert!(!is_public_default_name("Publish")); // 2 edits from "public"
+        assert!(!is_public_default_name(""));
+        assert!(!is_public_default_name("   "));
+    }
+
+    #[test]
+    fn public_default_excludes_dropped_scripts() {
+        // Chinese/Russian support is dropped, so the recognizer can never emit
+        // these and they are deliberately absent from the dictionary.
+        assert!(!is_public_default_name("公共"));
+        assert!(!is_public_default_name("Публичный"));
     }
 
     #[test]
@@ -2032,6 +2182,78 @@ mod tests {
         assert_eq!(canvas.len(), w * h);
         // The quiet-zone border stays background (dark).
         assert_eq!(canvas[0], 0);
+    }
+
+    #[test]
+    fn dominant_text_band_finds_single_contiguous_run() {
+        // One bright text run on rows 6..=12 (2 stroke pixels per row, clearing
+        // min_ink=2 at this width); everything else dark. The band is that run.
+        let (w, h) = (16usize, 24usize);
+        let mut g = vec![0u8; w * h];
+        for y in 6..=12 {
+            g[y * w] = 255;
+            g[y * w + 1] = 255;
+        }
+        assert_eq!(dominant_text_band(&g, w, h), Some((6, 12)));
+    }
+
+    #[test]
+    fn dominant_text_band_keeps_brightest_run_and_drops_dim_noise() {
+        // A dim noise band (value 100, below the 0.55*255≈140 ink level) on top,
+        // a short bright run, and a taller bright run lower down. The tall run
+        // carries the most stroke pixels, so it wins; the noise never counts.
+        let (w, h) = (16usize, 30usize);
+        let mut g = vec![0u8; w * h];
+        for y in 0..=4 {
+            for x in 0..w {
+                g[y * w + x] = 100; // dim noise strip — no near-white pixels
+            }
+        }
+        for y in 8..=9 {
+            g[y * w] = 255;
+            g[y * w + 1] = 255; // small bright run (energy 4)
+        }
+        for y in 18..=26 {
+            g[y * w] = 255;
+            g[y * w + 1] = 255; // tall bright run (energy 18) — wins
+        }
+        assert_eq!(dominant_text_band(&g, w, h), Some((18, 26)));
+    }
+
+    #[test]
+    fn dominant_text_band_grows_across_thin_cap_and_descender_tips() {
+        // Main run rows 10..=15 (2 px each). A single bright pixel one row above
+        // (a cap/ascender tip) and one row below (a descender tail) fall below
+        // min_ink but still carry a stroke pixel, so the band grows to include
+        // them rather than clipping the glyph.
+        let (w, h) = (16usize, 24usize);
+        let mut g = vec![0u8; w * h];
+        for y in 10..=15 {
+            g[y * w] = 255;
+            g[y * w + 1] = 255;
+        }
+        g[9 * w] = 255; // cap tip above
+        g[16 * w] = 255; // descender below
+        assert_eq!(dominant_text_band(&g, w, h), Some((9, 16)));
+    }
+
+    #[test]
+    fn dominant_text_band_ignores_sub_min_ink_speckle() {
+        // One bright pixel per row (below min_ink=2) is isolated sensor speckle,
+        // not a stroke row: no run is ever seeded, so there is no band.
+        let (w, h) = (16usize, 20usize);
+        let mut g = vec![0u8; w * h];
+        for y in 0..h {
+            g[y * w] = 255;
+        }
+        assert_eq!(dominant_text_band(&g, w, h), None);
+    }
+
+    #[test]
+    fn dominant_text_band_returns_none_for_blank_or_empty() {
+        // All-dark crop has no peak; zero-sized crop has no rows.
+        assert_eq!(dominant_text_band(&vec![0u8; 16 * 4], 16, 4), None);
+        assert_eq!(dominant_text_band(&[], 0, 0), None);
     }
 
     #[test]

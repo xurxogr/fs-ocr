@@ -311,7 +311,7 @@ impl TemplateDatabase {
         let images_shape = images_ds.shape();
         let img_h = images_shape[1] as i32;
         let img_w = images_shape[2] as i32;
-        let img_c = images_shape[3] as usize;
+        let img_c = images_shape[3];
         let pixels_per_image = (img_h as usize) * (img_w as usize) * img_c;
 
         // Read all data as flat vectors

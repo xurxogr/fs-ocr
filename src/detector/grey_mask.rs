@@ -8,7 +8,8 @@ use rayon::prelude::*;
 use crate::constants::{
     compute_scale_factor, scale_value, BOX_HEIGHT, BOX_WIDTH, COLUMN_OFFSET, GRAY_LOWER,
     GRAY_UPPER, GROUP_OFFSET, ICON_TO_QUANTITY_OFFSET, PIXEL_DIFF_TOLERANCE, ROW_OFFSET,
-    SAMPLE_RATE_BASE, SHARD_WIDTH_FACTOR, STOCKPILE_NAME_WIDTH_FACTOR, STOCKPILE_TYPE_WIDTH_FACTOR,
+    SAMPLE_RATE_BASE, SHARD_WIDTH_FACTOR, STOCKPILE_NAME_WIDTH_FACTOR,
+    STOCKPILE_TYPE_HEIGHT_FACTOR, STOCKPILE_TYPE_TOP_FACTOR, STOCKPILE_TYPE_WIDTH_FACTOR,
     TITLE_HEIGHT, TITLE_MARGIN, TITLE_MIN_WIDTH,
 };
 use crate::error::{FsOcrError, Result};
@@ -593,13 +594,22 @@ impl GreyMaskDetector {
         let title_max_x = (max_detected_x + self.box_width + self.title_margin)
             .max(title_min_x + self.title_min_width);
 
-        // Stockpile type region: ABOVE the ROI, narrow width to avoid background
-        // Width is 4x box_width (stockpile_type_width), height is box_height
+        // Stockpile type region: a box-height band sits just above the ROI, but
+        // the type label only fills a slab of it (the rest is a noise strip above
+        // and grey background below). Crop directly to that measured slab —
+        // [`STOCKPILE_TYPE_TOP_FACTOR`]..+[`STOCKPILE_TYPE_HEIGHT_FACTOR`] of the
+        // band — so the region is text-only without any runtime band-finding.
+        // Width is 4x box_width (stockpile_type_width); horizontal trim handles
+        // the variable word length.
+        let band_top = roi_y - self.box_height;
+        let type_y = band_top + (self.box_height as f64 * STOCKPILE_TYPE_TOP_FACTOR).round() as i32;
+        let type_h =
+            ((self.box_height as f64 * STOCKPILE_TYPE_HEIGHT_FACTOR).round() as i32).max(1);
         regions.type_region = Some((
             roi_x + self.box_width / 4,
-            roi_y - self.box_height,
+            type_y,
             self.stockpile_type_width,
-            self.box_height,
+            type_h,
         ));
 
         // Shard/timestamp region (bottom-left corner)
@@ -617,15 +627,11 @@ impl GreyMaskDetector {
         let threshold_pinned = self.row_offset + self.box_height;
 
         if info_bar_height < threshold_old {
-            // Old format: name at same Y level as type region (above ROI)
+            // Old format: name sits on the same line as the type, so it shares the
+            // type region's text slab (same Y and height) — not the full box-height
+            // band, which would re-introduce the noise strip above / grey below.
             let name_x = title_max_x - self.stockpile_name_width - self.box_width;
-            let name_y = roi_y - self.box_height; // Same Y as type_region
-            regions.name_region = Some((
-                name_x,
-                name_y,
-                self.stockpile_name_width,
-                self.box_height, // Same height as type_region
-            ));
+            regions.name_region = Some((name_x, type_y, self.stockpile_name_width, type_h));
         } else if info_bar_height < threshold_no_name {
             // No custom name
             regions.name_region = None;

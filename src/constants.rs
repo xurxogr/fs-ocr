@@ -131,6 +131,17 @@ pub const GRID_COLUMNS: usize = 6;
 /// Width of stockpile type region (4x box_width at 2160p).
 pub const STOCKPILE_TYPE_WIDTH_FACTOR: f64 = 4.0;
 
+/// Vertical placement of the type label inside the box-height band that sits
+/// just above the ROI. Measured across 1050p–2160p: the text consistently
+/// occupies ~28%–82% of the band, with a noise strip above and grey background
+/// below. Cropping to this slab directly yields a tight, text-only region — no
+/// runtime band-finding needed.
+pub const STOCKPILE_TYPE_TOP_FACTOR: f64 = 0.24;
+/// Height of the type label as a fraction of the box-height band (covers the
+/// ~46% text run plus a margin on each side, with extra headroom above so the
+/// taller old-format name line — which shares this slab — isn't read tight).
+pub const STOCKPILE_TYPE_HEIGHT_FACTOR: f64 = 0.64;
+
 /// Width of stockpile name region (2.5x box_width at 2160p).
 pub const STOCKPILE_NAME_WIDTH_FACTOR: f64 = 2.5;
 
