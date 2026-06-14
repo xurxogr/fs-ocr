@@ -1,43 +1,39 @@
 //! OCR components for text and quantity extraction.
 //!
-//! This module provides OCR functionality with two backends:
-//! - **ocrs (default)**: Pure Rust, Latin characters and digits, no external deps
-//! - **Tesseract (ocr-full feature)**: Multilingual support, requires system Tesseract
+//! Text is recognized by the pure-Rust **ocrs** backend (Latin/Cyrillic digits
+//! and letters, no external dependencies) — the single OCR path for type, shard,
+//! timestamp and custom names.
 //!
-//! Build with `--features ocr-full` to enable Tesseract backend.
+//! Chinese *custom* stockpile names fall outside the ocrs alphabet; they are read
+//! by an optional runtime call to the system `tesseract` CLI (see
+//! [`ChineseNameReader`]). When that binary isn't installed the name is left
+//! unread and everything else still scans.
 
 pub mod digit_matcher;
 pub mod engine;
 pub mod preprocess;
 pub mod quantity;
 
-// Pure-Rust ocrs backend (default). Excluded from ocr-full builds so the
-// Tesseract distribution doesn't ship the embedded 9MB recognition model.
-#[cfg(not(feature = "ocr-full"))]
+// Pure-Rust ocrs backend: the single OCR path for type, shard, timestamp and
+// Latin/Cyrillic names.
 pub mod basic;
 
-// Tesseract backend (requires system Tesseract installation)
-#[cfg(feature = "ocr-full")]
+// Optional Chinese custom-name reader via the system `tesseract` CLI (runtime
+// dependency; a no-op when the binary isn't installed).
 pub mod tesseract;
 
 // Re-exports
-#[cfg(not(feature = "ocr-full"))]
 pub use basic::OcrsEngine;
 pub use engine::{OcrConfig, OcrEngine};
 pub use preprocess::{
     preprocess_for_ocr, preprocess_quantity_composite, preprocess_quantity_with_upscale,
 };
 pub use quantity::parse_quantity;
+pub use tesseract::ChineseNameReader;
 
-// TextExtractor: Use Tesseract when ocr-full is enabled, otherwise use ocrs wrapper
-#[cfg(feature = "ocr-full")]
-pub use tesseract::TextExtractor;
-
-#[cfg(not(feature = "ocr-full"))]
 pub use self::ocrs_extractor::TextExtractor;
 
-/// Ocrs-based TextExtractor wrapper (used when ocr-full is not enabled).
-#[cfg(not(feature = "ocr-full"))]
+/// Ocrs-based single-line/-block text extractor used across the pipeline.
 mod ocrs_extractor {
     use super::{quantity, OcrConfig, OcrEngine, OcrsEngine};
 

@@ -25,7 +25,7 @@ pub enum FsOcrError {
     #[error("OpenCV error: {0}")]
     OpenCv(String),
 
-    /// Tesseract OCR error.
+    /// OCR (text recognition) error.
     #[error("OCR error: {0}")]
     Ocr(String),
 

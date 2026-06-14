@@ -20,9 +20,6 @@ default = ["python"]
 # builds. Disable it (`--no-default-features`) to build the standalone `fs-ocr`
 # CLI with zero Python/libpython dependency on every platform.
 python = ["dep:pyo3", "dep:numpy"]
-# Full OCR with Tesseract (requires system Tesseract installation)
-# Build with: maturin build --release --features ocr-full
-ocr-full = ["dep:leptess"]
 # Build (and statically link) HDF5 from source instead of using a system
 # libhdf5. Enabled in CI wheel builds so published wheels carry no external
 # libhdf5 dependency. Local dev builds keep using the system library (faster).
@@ -55,9 +52,6 @@ hdf5-sys = "0.8"
 ocrs = "0.11"
 rten = "0.22"
 rten-imageproc = "0.22"
-
-# Full OCR with Tesseract (optional, requires system installation)
-leptess = { version = "0.14", optional = true }
 
 [dev-dependencies]
 tempfile = "3.14"

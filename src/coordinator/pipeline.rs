@@ -7,10 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[cfg(not(feature = "ocr-full"))]
 use std::collections::HashMap;
-#[cfg(not(feature = "ocr-full"))]
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Maximum total boxes to process (prevents DoS via excessive memory allocation).
 /// A typical Foxhole stockpile has 6 columns × ~10 rows = 60 items max per view.
@@ -27,7 +25,7 @@ use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
 use crate::image_utils;
 use crate::models::{ItemCandidate, Stockpile, StockpileItem, Timing};
-use crate::ocr::{digit_matcher, preprocess, TextExtractor};
+use crate::ocr::{digit_matcher, preprocess, ChineseNameReader, TextExtractor};
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, TemplateMatcher};
 use crate::template::phash::compute_phash;
@@ -38,7 +36,6 @@ use crate::template::phash::compute_phash;
 /// Cyrillic) and stops marker words from being hallucinated as stray digits.
 ///
 /// Shard names are a fixed Latin set (ABLE / CHARLIE / DevBranch / LIVE).
-#[cfg(not(feature = "ocr-full"))]
 const SHARD_MASK: &str = "ABCDEHILRVacehnrv";
 
 /// Timestamp masks are per script, matching the 3-way `ClientLanguage`. Each
@@ -46,12 +43,9 @@ const SHARD_MASK: &str = "ABCDEHILRVacehnrv";
 /// letters, so the localized `Day`/`Hours` markers decode as letters (which the
 /// parser discards) instead of corrupting the digit run. Latin uses the full
 /// alphabet so any Latin client (EN/DE/FR/PT/…) reads correctly.
-#[cfg(not(feature = "ocr-full"))]
 const TIME_MASK_LATIN: &str = "0123456789 ,.:-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-#[cfg(not(feature = "ocr-full"))]
 const TIME_MASK_CYRILLIC: &str =
     "0123456789 ,.:-АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя";
-#[cfg(not(feature = "ocr-full"))]
 const TIME_MASK_CHINESE: &str = "0123456789,，日时分";
 
 /// Per-script masks for the stockpile-type region. The localized type strings
@@ -61,19 +55,15 @@ const TIME_MASK_CHINESE: &str = "0123456789,，日时分";
 /// read on-script — without this an English label like "Aircraft Depot" decodes
 /// with stray Cyrillic glyphs ("X'rcraft Dcьзr") and matches nothing. The Latin
 /// mask carries the accents the EN/DE/FR/PT names use (Dépôt, Torreão, …).
-#[cfg(not(feature = "ocr-full"))]
 const TYPE_MASK_LATIN: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz -àâãçèéíóôú";
-#[cfg(not(feature = "ocr-full"))]
 const TYPE_MASK_CYRILLIC: &str =
     " АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя";
-#[cfg(not(feature = "ocr-full"))]
 const TYPE_MASK_CHINESE: &str = "营地要塞安全屋遗迹基堡边境城镇下仓库海港";
 
 /// Type-region decode cascade, tried in order. Latin first (the common client
 /// and the script most prone to cross-script intrusion), then Cyrillic, then
 /// Chinese; the first mask whose decode matches a known type wins, and its
 /// script tells us the client language for routing the shard/timestamp block.
-#[cfg(not(feature = "ocr-full"))]
 const TYPE_MASKS: &[(&str, ClientLanguage)] = &[
     (TYPE_MASK_LATIN, ClientLanguage::English),
     (TYPE_MASK_CYRILLIC, ClientLanguage::Russian),
@@ -90,26 +80,16 @@ pub struct ScanPipeline {
     config: ScanConfig,
     /// Loaded template database (cached).
     database: Option<Arc<TemplateDatabase>>,
-    /// Multilingual extractor for the shard/timestamp block on CJK/Cyrillic
-    /// clients. Reads the whole region (timestamp line + shard line) as one
-    /// block; the localized timestamp embeds CJK/Cyrillic, so it needs the full
-    /// `eng+chi_sim+rus` model. Routed to only when the client language detected
-    /// from the type region is Chinese or Russian.
-    block_extractor_multi: Option<TextExtractor>,
-    /// English-only extractor for the shard/timestamp block on Latin clients.
-    /// When the type region reads as non-CJK/non-Cyrillic the whole block is
-    /// Latin, so eng-only avoids the multilingual model misreading Latin text
-    /// (e.g. "ABLE" -> Cyrillic "АВЕЕ").
-    block_extractor_eng: Option<TextExtractor>,
-    /// Text extractor for type/name (Tesseract if ocr-full, otherwise ocrs).
+    /// ocrs extractor for Latin/Cyrillic custom stockpile names.
     text_extractor: Option<TextExtractor>,
     /// Lazily-built ocrs extractors keyed by their `allowed_chars` mask. A scan
     /// touches at most two masks (the fixed shard mask plus one script's
     /// timestamp mask), so this caches them across scans without reloading the
-    /// recognition model more than once per distinct mask. ocrs-only — the
-    /// Tesseract backend reads the region as one block and does not use masks.
-    #[cfg(not(feature = "ocr-full"))]
+    /// recognition model more than once per distinct mask.
     masked_extractors: Mutex<HashMap<String, TextExtractor>>,
+    /// Optional system-`tesseract` reader for Chinese custom names, probed once
+    /// on first Chinese name encountered. Absent install -> names left unread.
+    chinese_name_reader: OnceLock<ChineseNameReader>,
 }
 
 impl ScanPipeline {
@@ -120,11 +100,9 @@ impl ScanPipeline {
             data_path: data_path.as_ref().to_string_lossy().to_string(),
             config,
             database: None,
-            block_extractor_multi: None,
-            block_extractor_eng: None,
             text_extractor: None,
-            #[cfg(not(feature = "ocr-full"))]
             masked_extractors: Mutex::new(HashMap::new()),
+            chinese_name_reader: OnceLock::new(),
         }
     }
 
@@ -141,58 +119,14 @@ impl ScanPipeline {
             self.database = Some(Arc::new(db));
         }
 
-        // Initialize the multilingual block extractor.
-        // The shard/timestamp region is read as one block. On CJK/Cyrillic
-        // clients the in-game timestamp line embeds non-Latin characters
-        // (e.g. localized "Day"/"Hours") that surround the digits and affect
-        // segmentation, so it MUST use the multilingual Tesseract model
-        // (ocr-full) and fall back to eng. Do NOT make this English-only — it
-        // has been tested; dropping the non-Latin langs breaks the number reads.
-        if self.block_extractor_multi.is_none() {
-            match TextExtractor::new_for_text_block_default("eng+chi_sim+rus") {
-                Ok(extractor) => self.block_extractor_multi = Some(extractor),
-                Err(_) => match TextExtractor::new_for_text_block_default("eng") {
-                    Ok(extractor) => self.block_extractor_multi = Some(extractor),
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to initialize multilingual block OCR: {}",
-                            e
-                        );
-                    }
-                },
-            }
-        }
-
-        // Initialize the English-only block extractor.
-        // When the client language detected from the type region is neither
-        // Chinese nor Russian, the whole shard/timestamp block is Latin. The
-        // multilingual model misreads small Latin crops as Cyrillic
-        // (e.g. "DevBranch" -> "Беубгапсп"), so Latin clients read the block
-        // with this eng-only extractor instead.
-        if self.block_extractor_eng.is_none() {
-            match TextExtractor::new_for_text_block_default("eng") {
-                Ok(extractor) => self.block_extractor_eng = Some(extractor),
-                Err(e) => {
-                    eprintln!("Warning: Failed to initialize English block OCR: {}", e);
-                }
-            }
-        }
-
-        // Initialize text extractor for type/name
-        // Uses Tesseract with multilingual support if ocr-full feature is enabled
-        // Otherwise falls back to ocrs (Latin only)
+        // Initialize the ocrs extractor used for Latin/Cyrillic custom names.
+        // (The model name is cosmetic for ocrs — it always loads the embedded
+        // recognition model — so a single "eng" extractor suffices.)
         if self.text_extractor.is_none() {
-            // Try multilingual first (only works with Tesseract/ocr-full)
-            match TextExtractor::new_for_text_default("eng+chi_sim+rus") {
+            match TextExtractor::new_for_text_default("eng") {
                 Ok(extractor) => self.text_extractor = Some(extractor),
-                Err(_) => {
-                    // Fall back to English only
-                    match TextExtractor::new_for_text_default("eng") {
-                        Ok(extractor) => self.text_extractor = Some(extractor),
-                        Err(e) => {
-                            eprintln!("Warning: Failed to initialize text OCR: {}", e);
-                        }
-                    }
+                Err(e) => {
+                    eprintln!("Warning: Failed to initialize text OCR: {}", e);
                 }
             }
         }
@@ -220,9 +154,7 @@ impl ScanPipeline {
     /// call this once up front; CLI single-shot callers can skip it and let the
     /// engines build lazily on first use. Builds the fixed shard mask plus the
     /// timestamp masks for every `ClientLanguage` (Latin/Cyrillic/Chinese), so
-    /// no argument is needed — there are only three scripts. No-op on the
-    /// Tesseract (`ocr-full`) backend, which doesn't use decode masks.
-    #[cfg(not(feature = "ocr-full"))]
+    /// no argument is needed — there are only three scripts.
     pub fn warmup(&self) -> Result<()> {
         let mut cache = self
             .masked_extractors
@@ -239,12 +171,6 @@ impl ScanPipeline {
                 TextExtractor::new_for_text_default_with_allowed("eng", mask).unwrap_or_default()
             });
         }
-        Ok(())
-    }
-
-    /// No-op warmup on the Tesseract backend (no decode masks to build).
-    #[cfg(feature = "ocr-full")]
-    pub fn warmup(&self) -> Result<()> {
         Ok(())
     }
 
@@ -453,39 +379,22 @@ impl ScanPipeline {
         }
 
         // Extract shard and ingame timestamp. The region holds 2 lines:
-        // timestamp on top, shard name on bottom.
-        //
-        // The OCR model is picked by the client language detected from the type
-        // above: Latin clients use the eng-only extractor (the multilingual model
-        // misreads small Latin text as Cyrillic), CJK/Cyrillic clients use the
-        // multilingual one (their timestamp line embeds non-Latin glyphs).
+        // timestamp on top, shard name on bottom. The timestamp is read with the
+        // client language's per-script mask (detected from the type above).
         if let Some((x, y, w, h)) = regions.shard_region {
-            let engine = match client_language {
-                ClientLanguage::English => self
-                    .block_extractor_eng
-                    .as_ref()
-                    .or(self.block_extractor_multi.as_ref()),
-                ClientLanguage::Chinese | ClientLanguage::Russian => self
-                    .block_extractor_multi
-                    .as_ref()
-                    .or(self.block_extractor_eng.as_ref()),
-            };
-
-            if let Some(engine) = engine {
-                self.read_shard_region(
-                    image,
-                    width,
-                    height,
-                    (x, y, w, h),
-                    engine,
-                    client_language,
-                    stockpile,
-                );
-            }
+            self.read_shard_region(
+                image,
+                width,
+                height,
+                (x, y, w, h),
+                client_language,
+                stockpile,
+            );
         }
 
-        // Extract stockpile name (only for types that support custom names)
-        // May need multilingual support for Chinese/Russian names
+        // Extract stockpile name (only for types that support custom names).
+        // Latin/Cyrillic names read via ocrs; Chinese names via the optional
+        // tesseract CLI (see the name branch below).
         if stockpile.stockpile_type.has_custom_name() {
             let mut name_region_present = false;
             let mut is_public = false;
@@ -525,40 +434,24 @@ impl ScanPipeline {
                     }
                     stockpile.name = Some(PUBLIC_CANONICAL_NAME.to_string());
                     is_public = true;
-                } else if client_language != ClientLanguage::Chinese {
-                    // A custom (reserved) name. Read it with OCR — skipped on
-                    // Chinese clients, whose custom names are unsupported; the
-                    // stockpile is still flagged reserved below, just unread.
-                    if let Some(extractor) = &self.text_extractor {
-                        // The game wraps long names across two rows. Detect genuine
-                        // row wrapping (a tall blank gap) and lay the rows side by
-                        // side into one logical line before OCR, so the recognizer
-                        // gets line context and the original name is reconstructed.
-                        let lines = split_text_lines(&processed, proc_w, proc_h);
-
-                        if debug_ocr::enabled() && lines.len() > 1 {
-                            for (i, (buf, lw, lh)) in lines.iter().enumerate() {
-                                debug_ocr::save_gray(&format!("name_line{i}"), buf, *lw, *lh);
-                            }
-                        }
-
-                        let (ocr_img, ocr_w, ocr_h) = if lines.len() > 1 {
-                            join_lines_horizontally(&lines)
-                        } else {
-                            (processed, proc_w, proc_h)
-                        };
-
-                        if debug_ocr::enabled() && lines.len() > 1 {
-                            debug_ocr::save_gray("name_merged", &ocr_img, ocr_w, ocr_h);
-                        }
-
-                        if let Ok(text) =
-                            extractor.extract_text(&ocr_img, ocr_w as i32, ocr_h as i32, 1)
-                        {
-                            let name = text.trim();
-                            if !name.is_empty() {
-                                stockpile.name = Some(name.to_string());
-                            }
+                } else {
+                    // A custom (reserved) name. Read with the recognizer that
+                    // fits the client's script; a failed/absent read leaves the
+                    // name unset (still flagged reserved below).
+                    let name = if client_language == ClientLanguage::Chinese {
+                        // Chinese custom names fall outside the ocrs alphabet, so
+                        // read them with the system `tesseract` CLI when it's
+                        // installed; otherwise the name is left unread.
+                        self.chinese_name_reader
+                            .get_or_init(ChineseNameReader::new)
+                            .read(&processed, proc_w as u32, proc_h as u32)
+                    } else {
+                        self.read_custom_name_ocrs(&processed, proc_w, proc_h)
+                    };
+                    if let Some(name) = name {
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            stockpile.name = Some(name.to_string());
                         }
                     }
                 }
@@ -578,81 +471,48 @@ impl ScanPipeline {
             }
 
             // A present name region that isn't the public default is a custom
-            // (reserved) name — even a Chinese one we chose not to read.
+            // (reserved) name — even one we couldn't read (e.g. a Chinese name
+            // with no tesseract installed).
             stockpile.is_reserved = name_region_present && !is_public;
         }
 
         Ok(())
     }
 
-    /// Read the timestamp and shard name from the shard region.
+    /// Read a Latin/Cyrillic custom name from a preprocessed crop with ocrs.
     ///
-    /// The reading strategy differs by OCR backend (selected at compile time):
-    ///
-    /// - **Tesseract (`ocr-full`)**: read the whole region as one block. PSM 6
-    ///   segments the two lines internally, and on CJK/Cyrillic clients this is
-    ///   what reads the localized timestamp correctly — splitting it first
-    ///   regressed those reads, so we deliberately do not split here.
-    /// - **ocrs (default)**: ocrs recognizes a single rect with no line
-    ///   detection, so a 2-line crop collapses into garbage. We split the region
-    ///   into its top (timestamp) and bottom (shard) halves and read each as a
-    ///   single line. ocrs is Latin-only, so CJK/Cyrillic clients are out of
-    ///   scope for this backend regardless.
-    #[cfg(feature = "ocr-full")]
-    #[allow(clippy::too_many_arguments)] // shared call site requires a uniform signature with the ocrs variant
-    fn read_shard_region(
+    /// The game wraps long names across two rows; genuine row wrapping (a tall
+    /// blank gap) is detected and the rows are laid side by side into one logical
+    /// line before recognition, so the recognizer gets line context and the
+    /// original name is reconstructed. Returns `None` when no extractor is loaded.
+    fn read_custom_name_ocrs(
         &self,
-        image: &[u8],
-        width: i32,
-        height: i32,
-        region: (i32, i32, i32, i32),
-        engine: &TextExtractor,
-        _client_language: ClientLanguage,
-        stockpile: &mut Stockpile,
-    ) {
-        let (x, y, w, h) = region;
-        let block_img = extract_region(
-            image,
-            width as usize,
-            height as usize,
-            x.max(0) as usize,
-            y.max(0) as usize,
-            w as usize,
-            h as usize,
-        );
+        processed: &[u8],
+        proc_w: usize,
+        proc_h: usize,
+    ) -> Option<String> {
+        let extractor = self.text_extractor.as_ref()?;
 
-        // The region is two text lines; upscale toward a legible per-line height
-        // so low-res crops stay readable as a block.
-        let (processed, proc_w, proc_h) = preprocess_for_recognizer(
-            &block_img,
-            w as usize,
-            h as usize,
-            2,
-            &PreprocessParams::strip(),
-        );
-
-        if debug_ocr::enabled() {
-            debug_ocr::save_gray("shard_block", &processed, proc_w, proc_h);
-        }
-
-        if let Ok(text) = engine.extract_text(&processed, proc_w as i32, proc_h as i32, 1) {
-            // PSM 6 reads the block as multiple lines. Classify each: the line
-            // carrying the digits is the timestamp, the line matching a known
-            // shard is the shard name.
-            for line in text.lines() {
-                let timestamp = extract_day_and_hour(line);
-                if !timestamp.is_empty() {
-                    stockpile.ingame_timestamp = Some(timestamp);
-                    break;
-                }
-            }
-            for line in text.lines() {
-                if let Some(shard) = match_shard_name(line) {
-                    stockpile.shard = Some(shard.to_string());
-                    break;
-                }
+        let lines = split_text_lines(processed, proc_w, proc_h);
+        if debug_ocr::enabled() && lines.len() > 1 {
+            for (i, (buf, lw, lh)) in lines.iter().enumerate() {
+                debug_ocr::save_gray(&format!("name_line{i}"), buf, *lw, *lh);
             }
         }
+
+        let (ocr_img, ocr_w, ocr_h) = if lines.len() > 1 {
+            join_lines_horizontally(&lines)
+        } else {
+            (processed.to_vec(), proc_w, proc_h)
+        };
+
+        if debug_ocr::enabled() && lines.len() > 1 {
+            debug_ocr::save_gray("name_merged", &ocr_img, ocr_w, ocr_h);
+        }
+
+        extractor
+            .extract_text(&ocr_img, ocr_w as i32, ocr_h as i32, 1)
+            .ok()
     }
 
     /// Recognize the stockpile type and infer the client language from a
@@ -664,7 +524,6 @@ impl ScanPipeline {
     /// keeps each pass on-script so a clean Latin label isn't lost to a stray
     /// Cyrillic homoglyph. If no mask yields a known type, the type is
     /// `Undefined` and the language defaults to English (Latin routing).
-    #[cfg(not(feature = "ocr-full"))]
     fn recognize_type_text(
         &self,
         image: &[u8],
@@ -696,38 +555,6 @@ impl ScanPipeline {
         (StockpileType::Undefined, ClientLanguage::English)
     }
 
-    /// Tesseract (`ocr-full`): read the region as one multilingual block and
-    /// classify the type and client language from that single decode. Tesseract
-    /// has no decode masks, so the per-script cascade does not apply.
-    #[cfg(feature = "ocr-full")]
-    fn recognize_type_text(
-        &self,
-        image: &[u8],
-        width: i32,
-        height: i32,
-    ) -> (StockpileType, ClientLanguage) {
-        // Primary: template-match the rendered type labels (backend-agnostic).
-        if let Some(m) = Self::match_type_template(image, width, height) {
-            return m;
-        }
-
-        let Some(extractor) = &self.text_extractor else {
-            return (StockpileType::Undefined, ClientLanguage::English);
-        };
-        match extractor.extract_text(image, width, height, 1) {
-            Ok(text) => {
-                if debug_ocr::enabled() {
-                    eprintln!("[FS_DEBUG_OCR] type region raw text: {:?}", text);
-                }
-                (
-                    StockpileType::from_string(&text),
-                    ClientLanguage::detect(&text),
-                )
-            }
-            Err(_) => (StockpileType::Undefined, ClientLanguage::English),
-        }
-    }
-
     /// Template-match the preprocessed type crop against the embedded label
     /// renders, returning the type and the script routing for its language.
     /// `None` when nothing clears the match floor (the caller falls back to OCR).
@@ -754,7 +581,6 @@ impl ScanPipeline {
     /// caching one masked extractor per distinct `allowed_chars` string. The
     /// cache lock is held across the recognition call, which is fine: ocrs runs
     /// single-threaded (RTEN_NUM_THREADS=1) and scans are serial.
-    #[cfg(not(feature = "ocr-full"))]
     fn extract_with_mask(
         &self,
         allowed_chars: &str,
@@ -773,19 +599,20 @@ impl ScanPipeline {
         extractor.extract_text(image, width, height, 1)
     }
 
-    /// See the `ocr-full` variant above for the rationale behind the per-backend
-    /// split. This (ocrs) path reads the timestamp and shard as two single-line
-    /// half-crops, each with a decode mask: the timestamp uses the client's
-    /// script mask, the shard the fixed Latin shard mask.
-    #[cfg(not(feature = "ocr-full"))]
-    #[allow(clippy::too_many_arguments)] // shared call site requires a uniform signature with the ocr-full variant
+    /// Read the timestamp and shard name from the shard region.
+    ///
+    /// ocrs recognizes a single rect with no line detection, so a 2-line crop
+    /// collapses into garbage. We split the region into its top (timestamp) and
+    /// bottom (shard) halves and read each as a single line with a decode mask:
+    /// the timestamp uses the client's script mask, the shard the fixed Latin
+    /// shard mask. CJK/Cyrillic *timestamps* are out of scope for this Latin
+    /// recognizer; only the digits within them tend to survive.
     fn read_shard_region(
         &self,
         image: &[u8],
         width: i32,
         height: i32,
         region: (i32, i32, i32, i32),
-        _engine: &TextExtractor,
         client_language: ClientLanguage,
         stockpile: &mut Stockpile,
     ) {
@@ -866,7 +693,6 @@ impl ScanPipeline {
     /// Extract quantities using template-based digit matching.
     ///
     /// Primary method: template matching for Renner font digits.
-    /// Fallback: OCR for failed recognitions (when ocr-full is enabled).
     fn extract_quantities(
         &self,
         image: &[u8],
@@ -1811,11 +1637,11 @@ fn autocontrast(gray: &mut [u8], cutoff_percent: u32) {
     }
 }
 
-/// Client UI language, inferred from the stockpile type text.
+/// Client UI language, inferred from the stockpile type (via the matching
+/// [`TYPE_MASKS`] entry or type-template match).
 ///
-/// Used to route the shard/timestamp block to the right OCR model: Latin
-/// clients read it with an eng-only model, CJK/Cyrillic clients with the
-/// multilingual one.
+/// Routes the timestamp decode mask to the right script and decides whether a
+/// custom name is read via ocrs (Latin/Cyrillic) or the tesseract CLI (Chinese).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientLanguage {
     English,
@@ -1824,28 +1650,6 @@ enum ClientLanguage {
 }
 
 impl ClientLanguage {
-    /// Detect the client language from OCR'd type text by script.
-    ///
-    /// CJK ideographs imply the Chinese client; Cyrillic implies the Russian
-    /// client; anything else is treated as a Latin (English) client.
-    ///
-    /// Only the Tesseract backend uses this: it reads the type region as one
-    /// multilingual block and infers the script from the decoded text. The ocrs
-    /// backend instead learns the language from which [`TYPE_MASKS`] entry
-    /// matched, so this is dead code there.
-    #[cfg_attr(not(feature = "ocr-full"), allow(dead_code))]
-    fn detect(text: &str) -> Self {
-        let has_cjk = text.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
-        if has_cjk {
-            return ClientLanguage::Chinese;
-        }
-        let has_cyrillic = text.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
-        if has_cyrillic {
-            return ClientLanguage::Russian;
-        }
-        ClientLanguage::English
-    }
-
     /// Collapse a fine-grained [`GameLanguage`] (from a type-template match) to
     /// the script routing used for the shard/timestamp block: the Latin locales
     /// all read as English, Russian as Cyrillic, Chinese as Han.
@@ -1858,7 +1662,6 @@ impl ClientLanguage {
     }
 
     /// The timestamp decode mask for this client's script.
-    #[cfg(not(feature = "ocr-full"))]
     fn time_mask(self) -> &'static str {
         match self {
             ClientLanguage::English => TIME_MASK_LATIN,

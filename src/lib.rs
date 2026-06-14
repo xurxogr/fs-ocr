@@ -480,7 +480,7 @@ impl StockpileScanner {
     /// per-script timestamp lines, so the first scan of each script doesn't pay
     /// the model-load cost. Optional: long-lived scanners benefit from calling
     /// it once at startup; single-shot CLI use can skip it (engines build
-    /// lazily). No-op when built with the Tesseract backend.
+    /// lazily).
     pub fn warmup(&self) -> PyResult<()> {
         self.pipeline
             .warmup()
@@ -519,8 +519,7 @@ fn compute_phash(image: PyReadonlyArray3<u8>) -> PyResult<u64> {
 /// Python module definition.
 ///
 /// Built as the native sub-module `fs_ocr._fs_ocr`; the `fs_ocr` Python package
-/// (see `python/fs_ocr/__init__.py`) re-exports these symbols and guards against
-/// the `fs-ocr` / `fs-ocr-tesseract` distributions being installed together.
+/// (see `python/fs_ocr/__init__.py`) re-exports these symbols.
 #[cfg(feature = "python")]
 #[pymodule]
 fn _fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -548,14 +547,9 @@ fn _fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("__author__", env!("CARGO_PKG_AUTHORS"))?;
 
-    // OCR backend feature flags
-    m.add("HAS_OCR_BASIC", true)?; // ocrs - always available
-    m.add("HAS_OCR_FULL", cfg!(feature = "ocr-full"))?; // Tesseract - optional
-
-    // Primary OCR backend info
-    #[cfg(feature = "ocr-full")]
-    m.add("OCR_BACKEND", "tesseract")?;
-    #[cfg(not(feature = "ocr-full"))]
+    // OCR backend info. Text is always recognized by the embedded pure-Rust
+    // ocrs model. Chinese *custom names* are additionally read via the system
+    // `tesseract` CLI when it is installed (detected at runtime, not build time).
     m.add("OCR_BACKEND", "ocrs")?;
 
     Ok(())

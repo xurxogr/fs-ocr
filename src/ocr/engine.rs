@@ -20,7 +20,6 @@ pub struct OcrConfig {
     /// Decode-time character mask for the ocrs backend. When set, the recognizer
     /// may only emit these characters (others are excluded before CTC decode),
     /// which keeps closed-vocabulary fields on-script. `None` = no restriction.
-    /// Ignored by the Tesseract backend.
     pub allowed_chars: Option<String>,
 }
 
