@@ -21,6 +21,7 @@ use rayon::prelude::*;
 use super::debug_ocr;
 use crate::config::ScanConfig;
 use crate::detector::{BlackBoxDetector, DetectedRegions, GreyMaskDetector};
+use crate::enums::GameLanguage;
 use crate::enums::ItemFaction;
 use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
@@ -655,6 +656,13 @@ impl ScanPipeline {
         width: i32,
         height: i32,
     ) -> (StockpileType, ClientLanguage) {
+        // Primary: template-match the rendered type labels. Language-agnostic and
+        // independent of the recognizer charset, so it covers every locale.
+        if let Some(m) = Self::match_type_template(image, width, height) {
+            return m;
+        }
+
+        // Fallback: per-script OCR decode cascade.
         for &(mask, lang) in TYPE_MASKS {
             let Ok(text) = self.extract_with_mask(mask, image, width, height) else {
                 continue;
@@ -683,6 +691,11 @@ impl ScanPipeline {
         width: i32,
         height: i32,
     ) -> (StockpileType, ClientLanguage) {
+        // Primary: template-match the rendered type labels (backend-agnostic).
+        if let Some(m) = Self::match_type_template(image, width, height) {
+            return m;
+        }
+
         let Some(extractor) = &self.text_extractor else {
             return (StockpileType::Undefined, ClientLanguage::English);
         };
@@ -698,6 +711,28 @@ impl ScanPipeline {
             }
             Err(_) => (StockpileType::Undefined, ClientLanguage::English),
         }
+    }
+
+    /// Template-match the preprocessed type crop against the embedded label
+    /// renders, returning the type and the script routing for its language.
+    /// `None` when nothing clears the match floor (the caller falls back to OCR).
+    fn match_type_template(
+        image: &[u8],
+        width: i32,
+        height: i32,
+    ) -> Option<(StockpileType, ClientLanguage)> {
+        let m = crate::template::type_match::match_type_label(
+            image,
+            width.max(0) as usize,
+            height.max(0) as usize,
+        )?;
+        if debug_ocr::enabled() {
+            eprintln!(
+                "[FS_DEBUG_OCR] type template match: {:?} ({:?}) score={:.3}",
+                m.stype, m.lang, m.score
+            );
+        }
+        Some((m.stype, ClientLanguage::from_game(m.lang)))
     }
 
     /// Run the ocrs recognizer over `image` with a decode mask, building and
@@ -1794,6 +1829,17 @@ impl ClientLanguage {
             return ClientLanguage::Russian;
         }
         ClientLanguage::English
+    }
+
+    /// Collapse a fine-grained [`GameLanguage`] (from a type-template match) to
+    /// the script routing used for the shard/timestamp block: the Latin locales
+    /// all read as English, Russian as Cyrillic, Chinese as Han.
+    fn from_game(lang: GameLanguage) -> Self {
+        match lang {
+            GameLanguage::Russian => ClientLanguage::Russian,
+            GameLanguage::Chinese => ClientLanguage::Chinese,
+            _ => ClientLanguage::English,
+        }
     }
 
     /// The timestamp decode mask for this client's script.

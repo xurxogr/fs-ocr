@@ -77,6 +77,26 @@ impl StockpileType {
     pub fn from_string(value: &str) -> Self {
         Self::classify_from_text(value)
     }
+
+    /// Map a stored discriminant (e.g. a template's `type_id`) back to the enum.
+    pub fn from_discriminant(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Encampment),
+            1 => Some(Self::Keep),
+            2 => Some(Self::SafeHouse),
+            3 => Some(Self::RelicBase),
+            4 => Some(Self::BunkerBase),
+            5 => Some(Self::BorderBase),
+            6 => Some(Self::TownBase),
+            7 => Some(Self::UndergroundFortress),
+            8 => Some(Self::BmsLonghook),
+            9 => Some(Self::StorageDepot),
+            10 => Some(Self::Seaport),
+            11 => Some(Self::AircraftDepot),
+            12 => Some(Self::Undefined),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(feature = "python")]
