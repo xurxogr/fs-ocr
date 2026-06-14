@@ -487,84 +487,99 @@ impl ScanPipeline {
         // Extract stockpile name (only for types that support custom names)
         // May need multilingual support for Chinese/Russian names
         if stockpile.stockpile_type.has_custom_name() {
+            let mut name_region_present = false;
+            let mut is_public = false;
             if let Some((x, y, w, h)) = regions.name_region {
-                if let Some(extractor) = &self.text_extractor {
-                    let name_img = extract_region(
-                        image,
-                        width as usize,
-                        height as usize,
-                        x.max(0) as usize,
-                        y.max(0) as usize,
-                        w as usize,
-                        h as usize,
-                    );
+                name_region_present = true;
+                let name_img = extract_region(
+                    image,
+                    width as usize,
+                    height as usize,
+                    x.max(0) as usize,
+                    y.max(0) as usize,
+                    w as usize,
+                    h as usize,
+                );
 
-                    // Preprocess with extra upscale for better name detection
-                    let (processed, proc_w, proc_h) = preprocess_for_recognizer(
-                        &name_img,
-                        w as usize,
-                        h as usize,
-                        1,
-                        &PreprocessParams::name(scale_factor, 4.0),
-                    );
+                // Preprocess with extra upscale for better name detection.
+                let (processed, proc_w, proc_h) = preprocess_for_recognizer(
+                    &name_img,
+                    w as usize,
+                    h as usize,
+                    1,
+                    &PreprocessParams::name(scale_factor, 4.0),
+                );
 
-                    // The game wraps long names across two rows. Detect genuine
-                    // row wrapping (a tall blank gap between text bands) and, when
-                    // present, lay the rows side by side into a single logical line
-                    // before OCR. This both reconstructs the original name and lets
-                    // Tesseract use line context — isolated single glyphs (e.g. a
-                    // lone CJK character per row) are otherwise misread.
-                    let lines = split_text_lines(&processed, proc_w, proc_h);
+                if debug_ocr::enabled() {
+                    debug_ocr::save_gray("name", &processed, proc_w, proc_h);
+                }
 
+                // Primary: is this the game's localized public default? Matched as
+                // a template, so it is recognized in every language — including
+                // zh/ru, whose custom names the recognizer can't read.
+                if let Some(lang) =
+                    crate::template::public_match::match_public_label(&processed, proc_w, proc_h)
+                {
                     if debug_ocr::enabled() {
-                        if lines.len() > 1 {
+                        eprintln!("[FS_DEBUG_OCR] name matched public default ({lang:?})");
+                    }
+                    stockpile.name = Some(PUBLIC_CANONICAL_NAME.to_string());
+                    is_public = true;
+                } else if client_language != ClientLanguage::Chinese {
+                    // A custom (reserved) name. Read it with OCR — skipped on
+                    // Chinese clients, whose custom names are unsupported; the
+                    // stockpile is still flagged reserved below, just unread.
+                    if let Some(extractor) = &self.text_extractor {
+                        // The game wraps long names across two rows. Detect genuine
+                        // row wrapping (a tall blank gap) and lay the rows side by
+                        // side into one logical line before OCR, so the recognizer
+                        // gets line context and the original name is reconstructed.
+                        let lines = split_text_lines(&processed, proc_w, proc_h);
+
+                        if debug_ocr::enabled() && lines.len() > 1 {
                             for (i, (buf, lw, lh)) in lines.iter().enumerate() {
                                 debug_ocr::save_gray(&format!("name_line{i}"), buf, *lw, *lh);
                             }
-                        } else {
-                            debug_ocr::save_gray("name", &processed, proc_w, proc_h);
                         }
-                    }
 
-                    let (ocr_img, ocr_w, ocr_h) = if lines.len() > 1 {
-                        join_lines_horizontally(&lines)
-                    } else {
-                        (processed, proc_w, proc_h)
-                    };
+                        let (ocr_img, ocr_w, ocr_h) = if lines.len() > 1 {
+                            join_lines_horizontally(&lines)
+                        } else {
+                            (processed, proc_w, proc_h)
+                        };
 
-                    if debug_ocr::enabled() && lines.len() > 1 {
-                        debug_ocr::save_gray("name_merged", &ocr_img, ocr_w, ocr_h);
-                    }
+                        if debug_ocr::enabled() && lines.len() > 1 {
+                            debug_ocr::save_gray("name_merged", &ocr_img, ocr_w, ocr_h);
+                        }
 
-                    if let Ok(text) =
-                        extractor.extract_text(&ocr_img, ocr_w as i32, ocr_h as i32, 1)
-                    {
-                        let name = text.trim();
-                        if !name.is_empty() {
-                            stockpile.name = Some(name.to_string());
+                        if let Ok(text) =
+                            extractor.extract_text(&ocr_img, ocr_w as i32, ocr_h as i32, 1)
+                        {
+                            let name = text.trim();
+                            if !name.is_empty() {
+                                stockpile.name = Some(name.to_string());
+                            }
                         }
                     }
                 }
             }
 
-            // A public stockpile carries the game's localized default label
-            // ("Public"/"Público"/"Öffentlich"); only a different, non-empty name
-            // is a user-chosen reserve. Match the default fuzzily so an OCR
-            // misread of it (l/I, dropped accent) still reads as public, then
-            // normalize it to the canonical label so callers see one spelling.
-            let has_name = stockpile
-                .name
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|n| !n.is_empty());
-            let is_public_default = stockpile
-                .name
-                .as_deref()
-                .is_some_and(is_public_default_name);
-            if is_public_default {
+            // Fallback for Latin clients: an OCR misread of the public default
+            // that the template missed (l/I, dropped accent) still normalizes to
+            // the canonical label rather than being treated as a custom name.
+            if !is_public
+                && stockpile
+                    .name
+                    .as_deref()
+                    .is_some_and(is_public_default_name)
+            {
                 stockpile.name = Some(PUBLIC_CANONICAL_NAME.to_string());
+                is_public = true;
             }
-            stockpile.is_reserved = has_name && !is_public_default;
+
+            // A present name region that isn't the public default is a custom
+            // (reserved) name — even a Chinese one we chose not to read.
+            stockpile.is_reserved = name_region_present && !is_public;
         }
 
         Ok(())
