@@ -117,8 +117,8 @@ mod tests {
     fn test_compute_otsu_threshold() {
         // Create bimodal histogram (half black, half white)
         let mut image = vec![0u8; 100];
-        for i in 50..100 {
-            image[i] = 255;
+        for px in image.iter_mut().skip(50) {
+            *px = 255;
         }
 
         let threshold = compute_otsu_threshold(&image);

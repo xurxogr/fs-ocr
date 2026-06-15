@@ -286,8 +286,8 @@ mod tests {
         let mut img2 = img1.clone();
 
         // Change a small region in img2
-        for i in 0..100 {
-            img2[i] = 180;
+        for px in img2.iter_mut().take(100) {
+            *px = 180;
         }
 
         let hash1 = compute_phash(&img1, 64, 64);
