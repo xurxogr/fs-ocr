@@ -12,12 +12,13 @@
 sudo apt-get install cmake gcc g++ libclang-dev
 ```
 
-The default backend uses pure-Rust OCR (`ocrs`/`rten`) and needs **no**
-Tesseract, Leptonica, or OpenCV. Those are only required for the optional
-`ocr-full` (Tesseract) backend:
+OCR is pure-Rust (`ocrs`/`rten`) with the recognition model embedded in the
+binary — no Tesseract, Leptonica, or OpenCV needed to build or run. The only
+optional piece is the **system `tesseract` CLI**, used at runtime to read
+Chinese custom names if it happens to be installed (no build flag involved):
 
 ```bash
-sudo apt-get install libtesseract-dev libleptonica-dev
+sudo apt-get install tesseract-ocr   # optional, runtime-only, Chinese names
 ```
 
 ### Install for Development
@@ -30,11 +31,8 @@ cd fs-ocr
 # Install Python dev dependencies
 pip install maturin pytest numpy
 
-# Build and install the Python module (default, pure-Rust OCR)
+# Build and install the Python module (default features include `python`)
 maturin develop --release
-
-# Or with the Tesseract backend
-maturin develop --release --features ocr-full
 ```
 
 ## Available Commands
@@ -43,22 +41,35 @@ maturin develop --release --features ocr-full
 | Command | Description |
 |---------|-------------|
 | `cargo test` | Run the unit test suite |
-| `cargo clippy -- -D warnings` | Run Clippy linter (warnings as errors) |
+| `cargo clippy --all-targets -- -D warnings` | Run Clippy linter (warnings as errors) |
 | `cargo fmt` | Format code with rustfmt |
 | `cargo build` | Build debug version |
 | `cargo build --release` | Build optimized release |
-| `cargo build --release --bin fs-ocr` | Build the CLI binary |
+| `cargo build --release --no-default-features --bin fs-ocr` | Build the standalone CLI (no libpython linkage) |
 | `maturin develop --release` | Build + install Python module |
 | `maturin build --release` | Build distributable wheel |
-| `maturin build --release --features ocr-full` | Wheel with Tesseract backend |
+| `maturin build --release --features static-hdf5,pyo3/extension-module` | CI-style abi3 wheel with static HDF5 |
 <!-- END AUTO-GENERATED -->
 
 ## Feature Flags
 
+<!-- AUTO-GENERATED from Cargo.toml [features] -->
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `ocr-full` | off | Tesseract backend via `leptess` (needs system Tesseract) |
-| `static-hdf5` | off | Build/statically link libhdf5 from source (used by CI wheels) |
+| `python` | **on** | PyO3 + numpy bindings. Drop with `--no-default-features` for a pure CLI build with no libpython linkage. |
+| `static-hdf5` | off | Build/statically link libhdf5 + zlib from source (used by CI wheels; needs CMake + a C/C++ compiler). |
+<!-- END AUTO-GENERATED -->
+
+## Environment Variables
+
+<!-- AUTO-GENERATED from source (std::env::var) -->
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `FS_OCR_TIMING` | No | Set to `1` to include per-stage timing (ms) in the CLI's JSON output. |
+| `FS_DEBUG_OCR` | No | Set to `1` to dump `debug_image.png` + per-region OCR crops to the cwd (debugging the OCR pipeline). |
+| `FS_OCR_TESSERACT` | No | Path/name of the `tesseract` binary for Chinese custom names (default `tesseract`). |
+| `FS_OCR_TESSERACT_LANG` | No | Tesseract language for Chinese custom names (default `chi_sim`). |
+<!-- END AUTO-GENERATED -->
 
 ## Testing
 

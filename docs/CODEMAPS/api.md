@@ -1,4 +1,4 @@
-<!-- Generated: 2026-05-21 | Files scanned: 31 | Token estimate: ~650 -->
+<!-- Generated: 2026-06-15 | Files scanned: 41 | Token estimate: ~650 -->
 
 # fs-ocr API
 
@@ -86,11 +86,12 @@ StockpileType: Seaport=0, StorageDepot=1, ... Undefined
 
 ```python
 fs_ocr.__version__, fs_ocr.__author__
-fs_ocr.HAS_OCR_BASIC   # True (ocrs always available)
-fs_ocr.HAS_OCR_FULL    # True only if built with ocr-full
-fs_ocr.OCR_BACKEND     # "ocrs" or "tesseract"
+fs_ocr.OCR_BACKEND     # "ocrs" (pure-Rust recognizer, embedded model)
 fs_ocr.compute_phash(image: np.ndarray) -> int   # 64-bit pHash
 ```
+
+Note: Chinese custom names use the system `tesseract` CLI at runtime if
+installed (optional; no build flag, no Python attribute).
 
 ## CLI (`fs-ocr` binary)
 

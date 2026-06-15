@@ -1,4 +1,4 @@
-<!-- Generated: 2026-05-21 | Files scanned: 31 | Token estimate: ~800 -->
+<!-- Generated: 2026-06-15 | Files scanned: 41 | Token estimate: ~800 -->
 
 # fs-ocr Internals
 
@@ -60,7 +60,7 @@ Process:
   4. Tiebreaker: if top NCC gap ≤ ncc_tiebreaker_threshold (0.003),
      pick winner by edge(Sobel)-diff
   5. Group-based category detection (first group may skip filter)
-Output: MatchResult { best_match, confidence, top_matches, gap_candidates }
+Output: MatchResult { best_match, confidence, gap_candidates }
 ```
 
 ### 4. Metadata Extraction
@@ -68,11 +68,14 @@ Output: MatchResult { best_match, confidence, top_matches, gap_candidates }
 ```
 Regions: type_region, name_region, shard_region
 Process:
-  - Type/Name: TextExtractor (Tesseract if ocr-full "eng+chi_sim+rus",
-    else ocrs "eng") → StockpileType::from_string()
-  - Shard + in-game timestamp: shard_extractor (ocrs, Latin-only)
-    timestamp parsed as [0-9]+,[0-9]{4}
-  - name != "Public" → is_reserved = true
+  - Type: ocrs recognizer + type-template match (type_templates.bin)
+          → StockpileType + GameLanguage
+  - Name: ocrs recognizer for Latin/Cyrillic; Chinese custom names read
+          via the system `tesseract` CLI when installed (runtime probe).
+          "Public" default detected via public_templates.bin template match.
+  - Shard + in-game timestamp: ocrs (Latin), timestamp via metadata_parse
+          (client-language time mask → day + HH:MM)
+  - name is a non-public custom name → is_reserved = true
 ```
 
 ## Key Algorithms

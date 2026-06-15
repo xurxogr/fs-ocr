@@ -7,7 +7,7 @@ Fast OCR library for Foxhole stockpile screenshots, written in Rust with Python 
 - **Fast Template Matching**: pHash filtering + NCC scoring with adaptive candidate escalation
 - **ROI + Grey Mask Detection**: black-box ROI localization followed by grey-mask box detection
 - **Quantity Recognition**: template-based glyph matching (no OCR engine needed for digits)
-- **Pure-Rust OCR by default**: `ocrs`/`rten` for Latin text; optional Tesseract backend for Chinese/Russian (see [Chinese / Russian support](#chinese--russian-non-latin-support))
+- **Pure-Rust OCR**: `ocrs`/`rten` with an embedded model — reads Latin + Russian and localized stockpile types; Chinese custom names via the optional system `tesseract` CLI (see [Language support](#language-support))
 - **Python API + CLI**: PyO3 bindings (`import fs_ocr`) and an `fs-ocr` command-line tool
 
 ## Installation
@@ -22,85 +22,58 @@ tar -xzf fs-ocr-linux-x86_64.tar.gz   # or unzip the .zip on Windows
 ./fs-ocr scan screenshot.png -d templates.h5 --faction wardens
 ```
 
-Two builds are published per platform:
-
-- `fs-ocr-<os>-<arch>` — pure-Rust OCR, no system dependencies
-- `fs-ocr-tesseract-<os>-<arch>` — Tesseract backend (requires system Tesseract)
+One static build is published per platform (`fs-ocr-<os>-<arch>`) — pure-Rust
+OCR, no system dependencies. (The system `tesseract` CLI is used at runtime
+only if present, for Chinese custom names.)
 
 ### From PyPI
 
-Two distributions are published from this codebase; install exactly one:
-
 ```bash
-pip install fs-ocr            # pure-Rust OCR backend, zero system OCR libs
-pip install fs-ocr-tesseract  # Tesseract backend (requires system Tesseract)
+pip install fs-ocr
 ```
 
-Both import as `import fs_ocr`.
+OCR is pure Rust (`ocrs`/`rten`) with the recognition model embedded in the
+wheel — **no system OCR libraries** are required to install or run.
 
-> **Install exactly one.** The two distributions ship the same `fs_ocr`
-> module and cannot coexist. pip will not stop you from installing both, so
-> `import fs_ocr` raises a clear error if it detects both. To switch backends,
-> uninstall first:
->
-> ```bash
-> pip uninstall -y fs-ocr fs-ocr-tesseract
-> pip install fs-ocr           # or fs-ocr-tesseract
-> ```
+> You still need a **template database** (`.h5`) to scan against; it is not
+> bundled in the wheel. See [Template Database](#template-database).
 
-### Chinese / Russian (non-Latin) support
+### Language support
 
-The default pure-Rust backend (`ocrs`) only recognizes **Latin** text. Screenshots
-from the Chinese or Russian game clients need the Tesseract backend, which reads
-those scripts. There is **no language flag** — you just install the right package
-plus the matching language data, and scanning picks it up automatically (it loads
-`eng+chi_sim+rus` when available and falls back to `eng`).
+The embedded `ocrs` recognizer reads **Latin and Russian (Cyrillic)** text
+natively, and the closed set of localized stockpile-type names (including
+Chinese). No extra packages or language flags are needed for any of that.
 
-1. **Install the Tesseract distribution** instead of the default:
+The one exception is **free-form Chinese custom names**, which are read via the
+**system `tesseract` CLI** if it is installed — detected at runtime, entirely
+optional. If `tesseract` is absent, everything else still works and only the
+Chinese custom name is left unread (no error).
 
-   ```bash
-   pip install fs-ocr-tesseract
-   ```
+| OS | Optional install (Chinese custom names) |
+|----|------------------------------------------|
+| Debian/Ubuntu | `sudo apt install tesseract-ocr tesseract-ocr-chi-sim` |
+| Fedora/RHEL | `sudo dnf install tesseract tesseract-langpack-chi_sim` |
+| macOS (Homebrew) | `brew install tesseract tesseract-lang` |
+| Windows | [UB Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki) (select Chinese) or `choco install tesseract` |
 
-2. **Install system Tesseract + the language data.** The engine and traineddata
-   are *not* bundled — they come from your OS package manager, which also keeps
-   them patched for security. Tesseract finds them via the system `tessdata`
-   directory (or `TESSDATA_PREFIX`):
-
-   | OS | Command (engine + Simplified Chinese + Russian) |
-   |----|--------------------------------------------------|
-   | Debian/Ubuntu | `sudo apt install tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-rus` |
-   | Fedora/RHEL | `sudo dnf install tesseract tesseract-langpack-chi_sim tesseract-langpack-rus` |
-   | macOS (Homebrew) | `brew install tesseract tesseract-lang` (installs all languages) |
-   | Windows | [UB Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki) — select Chinese/Russian during setup — or `choco install tesseract` |
-
-   For Traditional Chinese, add `chi_tra` (e.g. `tesseract-ocr-chi-tra`).
-
-3. **Scan as usual** — no code change. If a language is missing, recognition
-   silently falls back to `eng`; install the package above to enable it.
-
-> Prefer the smallest traineddata? You can drop `chi_sim.traineddata` /
-> `rus.traineddata` from [`tessdata_fast`](https://github.com/tesseract-ocr/tessdata_fast)
-> into your `tessdata` directory and point `TESSDATA_PREFIX` at it instead of
-> using the OS packages.
+Override the binary or language via `FS_OCR_TESSERACT` / `FS_OCR_TESSERACT_LANG`
+(defaults `tesseract` / `chi_sim`).
 
 ### From Source
 
-The default build needs only a C/C++ toolchain (HDF5 is built from source via
-the `static-hdf5` feature). No OpenCV or Tesseract required for the default
-backend:
+The build needs only a C/C++ toolchain — HDF5 is built from source via the
+`static-hdf5` feature. No OpenCV or Tesseract dev libraries required:
 
 ```bash
 # Build deps (Ubuntu/Debian)
 sudo apt-get install cmake gcc g++ libclang-dev
 
-# Build and install (default, pure-Rust OCR)
+# Build and install the Python module
 pip install maturin
 maturin develop --release
 
-# Optional: Tesseract backend (also needs system Tesseract/Leptonica)
-sudo apt-get install libtesseract-dev libleptonica-dev
-maturin develop --release --features ocr-full
+# Or build the standalone CLI (no Python / libpython linkage)
+cargo build --release --no-default-features --bin fs-ocr
 ```
 
 ## Python Usage
@@ -225,9 +198,20 @@ Matching can be tuned with `--phash-threshold`, `--max-ncc-candidates`,
 and `--confidence-gap`. Set `FS_OCR_TIMING=1` to include per-stage timing in the
 output. Exit codes: `0` ok, `1` runtime error, `2` bad input.
 
-## Building the Template Database
+## Template Database
 
-The template database is built from game assets. See the main foxhole-stockpiles repository for details on generating the HDF5 database.
+`fs-ocr` matches icons against a pre-built HDF5 template database, supplied at
+runtime via the CLI `--database` flag or the `StockpileScanner(database_path=...)`
+argument. It is **not bundled** with the wheel or the CLI binary.
+
+The database is generated separately from game assets by the
+[foxhole-stockpiles](https://github.com/xurxogr/foxhole-stockpiles) project. Grab
+the `.h5` file from its [`data/`](https://github.com/xurxogr/foxhole-stockpiles/tree/main/data)
+directory and pass its path via `--database` / `database_path`.
+
+```bash
+fs-ocr scan screenshot.png -d fs_airborne.h5
+```
 
 ## Development
 
@@ -237,10 +221,10 @@ The template database is built from game assets. See the main foxhole-stockpiles
 | Command | Description |
 |---------|-------------|
 | `cargo test` | Run the Rust test suite |
-| `cargo clippy -- -D warnings` | Run linter (warnings as errors) |
+| `cargo clippy --all-targets -- -D warnings` | Run linter (warnings as errors) |
 | `cargo fmt` | Format code with rustfmt |
 | `cargo build --release` | Build optimized library |
-| `cargo build --release --bin fs-ocr` | Build the CLI binary |
+| `cargo build --release --no-default-features --bin fs-ocr` | Build the standalone CLI (no libpython) |
 | `maturin develop --release` | Build and install Python module (dev) |
 | `maturin build --release` | Build Python wheel for distribution |
 
@@ -248,7 +232,7 @@ The template database is built from game assets. See the main foxhole-stockpiles
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `ocr-full` | off | Tesseract backend via `leptess` (needs system Tesseract) |
+| `python` | **on** | PyO3 + numpy bindings; drop with `--no-default-features` for a pure CLI |
 | `static-hdf5` | off | Build/statically link libhdf5 from source (used by CI wheels) |
 
 ### Requirements
@@ -256,7 +240,7 @@ The template database is built from game assets. See the main foxhole-stockpiles
 - Rust toolchain (edition 2021)
 - Python 3.10+ (for bindings)
 - Build tools: `cmake`, `gcc`/`g++`, `libclang-dev`
-- Only for `ocr-full`: `libtesseract-dev`, `libleptonica-dev`
+- Optional runtime: system `tesseract` CLI (Chinese custom names only)
 
 ### Dev Dependencies
 
@@ -286,20 +270,23 @@ src/
 ├── detector/           # ROI + grey mask detection
 │   ├── black_box.rs    # Dark ROI localization (first pass)
 │   ├── geometry.rs
-│   └── grey_mask.rs
+│   └── grey_mask/      # detector + morphology + grouping
 ├── template/           # Template matching
 │   ├── database.rs     # HDF5 loading
 │   ├── matching.rs     # NCC + adaptive escalation + tiebreaker
-│   └── phash.rs        # Perceptual hashing
+│   ├── phash.rs        # Perceptual hashing
+│   └── {label,public,type}_match.rs  # embedded-asset template matchers
 ├── ocr/                # Text + quantity extraction
 │   ├── engine.rs       # OcrEngine trait + OcrConfig
 │   ├── basic.rs        # OcrsEngine (pure-Rust ocrs)
 │   ├── digit_matcher.rs# Glyph-template digit recognition (quantities)
-│   ├── preprocess.rs   # Grayscale/upscale/threshold
-│   ├── quantity.rs     # Quantity parsing + validation
-│   └── tesseract.rs    # Tesseract backend (feature: ocr-full)
+│   ├── preprocess.rs   # upscale helpers
+│   ├── quantity.rs     # Quantity validation
+│   └── tesseract.rs    # ChineseNameReader (system `tesseract` CLI)
 └── coordinator/        # Pipeline orchestration
     ├── pipeline.rs
+    ├── region_preprocess.rs # OCR image prep (luma/contrast/framing/upscale)
+    ├── metadata_parse.rs    # shard / timestamp / public-name parsing
     └── validation.rs
 ```
 
