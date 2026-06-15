@@ -34,6 +34,19 @@ static EMBEDDED_RECOGNITION_MODEL: &[u8] = include_bytes!("../../data/text-recog
 /// `training/build_alphabet.py` if the type translations change.
 const RECOGNITION_ALPHABET: &str = r##" 0123456789!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~EABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя营地要塞安全屋遗迹基堡边境城镇下仓库海港日时分，"##;
 
+/// Minimum pixel spread (max − min) for a region to be considered to contain
+/// ink. Uniform regions below this carry no text, so recognition is skipped to
+/// stop the model hallucinating glyphs from contrast-free pixels.
+const MIN_CONTRAST: u8 = 8;
+
+/// Whether an image region has too little contrast to contain text.
+fn is_blank(image: &[u8]) -> bool {
+    match (image.iter().min(), image.iter().max()) {
+        (Some(&lo), Some(&hi)) => hi - lo < MIN_CONTRAST,
+        _ => true, // empty buffer
+    }
+}
+
 /// Ocrs-based OCR engine implementing the OcrEngine trait.
 pub struct OcrsEngine {
     /// Configuration.
@@ -139,6 +152,12 @@ impl OcrsEngine {
 impl OcrEngine for OcrsEngine {
     fn extract_text(&self, image: &[u8], width: i32, height: i32) -> Result<String> {
         if !self.available {
+            return Ok(String::new());
+        }
+
+        // A region with no contrast carries no text; skip recognition so the
+        // model can't hallucinate glyphs from uniform pixels.
+        if is_blank(image) {
             return Ok(String::new());
         }
 
