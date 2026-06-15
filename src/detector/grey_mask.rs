@@ -96,82 +96,6 @@ impl GreyMaskDetector {
         self.detect_internal(image, width, height, true)
     }
 
-    /// Detect within an ROI region.
-    #[allow(clippy::too_many_arguments)]
-    pub fn detect_roi(
-        &self,
-        image: &[u8],
-        img_width: i32,
-        img_height: i32,
-        roi_x: i32,
-        roi_y: i32,
-        roi_w: i32,
-        roi_h: i32,
-    ) -> Result<DetectedRegions> {
-        let iw = img_width as usize;
-        let ih = img_height as usize;
-        let rx = roi_x as usize;
-        let ry = roi_y as usize;
-        let rw = roi_w as usize;
-        let rh = roi_h as usize;
-
-        if image.len() != iw * ih * 3 {
-            return Err(FsOcrError::Image(format!(
-                "Invalid image size: expected {}x{}x3={}, got {}",
-                iw,
-                ih,
-                iw * ih * 3,
-                image.len()
-            )));
-        }
-
-        // Step 1: Create grey mask for ROI region
-        let mask = self.create_grey_mask_roi(image, iw, rx, ry, rw, rh);
-
-        // Step 2: Find contours directly (skip morphology - ROI is clean)
-        let contours = find_contours(&mask, rw, rh);
-
-        // Step 4: Filter contours by size
-        let valid_boxes: Vec<BoundingRect> = contours
-            .into_iter()
-            .filter(|&(_, _, cw, ch)| self.is_valid_box_size(cw, ch))
-            .collect();
-
-        if valid_boxes.is_empty() {
-            return Err(FsOcrError::NoStockpileDetected);
-        }
-
-        // Skip adaptive threshold - ROI is already validated by black box detection
-        let final_boxes = valid_boxes;
-
-        // Step 6: Sort boxes
-        let mut sorted_boxes = final_boxes;
-        sorted_boxes.sort_by(|a, b| {
-            let y_cmp = a.1.cmp(&b.1);
-            if y_cmp == std::cmp::Ordering::Equal {
-                a.0.cmp(&b.0)
-            } else {
-                y_cmp
-            }
-        });
-
-        // Step 7: Group boxes
-        let (quantity_boxes, groups) = self.group_boxes(&sorted_boxes);
-
-        if quantity_boxes.is_empty() {
-            return Err(FsOcrError::NoStockpileDetected);
-        }
-
-        // Build result - coordinates are relative to ROI
-        let mut regions =
-            DetectedRegions::new(self.scale_factor, roi_h, self.box_width, self.box_height);
-        regions.quantity_boxes = quantity_boxes;
-        regions.groups = groups;
-        regions.icon_regions = self.compute_icon_regions(&regions.quantity_boxes);
-
-        Ok(regions)
-    }
-
     /// Fast ROI detection using adaptive grey threshold.
     ///
     /// Detects boxes by finding the most common "black" color in the first row,
@@ -309,39 +233,6 @@ impl GreyMaskDetector {
                         let is_grey = chroma <= MAX_CHROMA;
 
                         if bright_enough && is_grey {
-                            255u8
-                        } else {
-                            0u8
-                        }
-                    })
-                    .collect::<Vec<u8>>()
-            })
-            .collect()
-    }
-
-    /// Create a grey mask for an ROI region within a larger image.
-    fn create_grey_mask_roi(
-        &self,
-        image: &[u8],
-        img_width: usize,
-        roi_x: usize,
-        roi_y: usize,
-        roi_w: usize,
-        roi_h: usize,
-    ) -> Vec<u8> {
-        (0..roi_h)
-            .into_par_iter()
-            .flat_map(|dy| {
-                let y = roi_y + dy;
-                (0..roi_w)
-                    .map(|dx| {
-                        let x = roi_x + dx;
-                        let idx = (y * img_width + x) * 3;
-                        let r = image[idx];
-                        let g = image[idx + 1];
-                        let b = image[idx + 2];
-
-                        if Self::is_grey_pixel_static(r, g, b, self.gray_lower, self.gray_upper) {
                             255u8
                         } else {
                             0u8
@@ -893,33 +784,6 @@ impl GreyMaskDetector {
         (0..6)
             .map(|i| first_column_x + (column_offset_float * i as f64).round() as i32)
             .collect()
-    }
-
-    /// Debug: Get all contours found before size filtering.
-    pub fn debug_get_all_contours(
-        &self,
-        image: &[u8],
-        width: i32,
-        height: i32,
-    ) -> Result<Vec<BoundingRect>> {
-        let w = width as usize;
-        let h = height as usize;
-
-        if image.len() != w * h * 3 {
-            return Err(FsOcrError::Image(format!(
-                "Invalid image size: expected {}x{}x3={}, got {}",
-                w,
-                h,
-                w * h * 3,
-                image.len()
-            )));
-        }
-
-        let mask = self.create_grey_mask(image, w, h);
-        let processed = self.apply_morphology(&mask, w, h);
-        let contours = find_contours(&processed, w, h);
-
-        Ok(contours)
     }
 
     /// Compute icon regions from quantity box positions.

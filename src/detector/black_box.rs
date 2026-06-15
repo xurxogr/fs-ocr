@@ -4,10 +4,7 @@
 //! Used as a fast first pass to identify the Region of Interest (ROI)
 //! before running detailed grey mask detection on the cropped region.
 
-use crate::constants::{
-    compute_scale_factor, scale_value, BOX_HEIGHT, PIXEL_DIFF_TOLERANCE, ROW_OFFSET,
-    SAMPLE_RATE_BASE,
-};
+use crate::constants::{compute_scale_factor, scale_value, SAMPLE_RATE_BASE};
 
 use crate::error::Result;
 
@@ -60,8 +57,6 @@ pub struct BlackBoxDetector {
     min_width: i32,
     /// Maximum expected width (1200px at 2160p, scaled).
     max_width: i32,
-    /// Target height (row_gap + row_offset).
-    target_height: i32,
     /// Sample rate for sparse row scanning (scaled with resolution).
     sample_rate: usize,
 }
@@ -77,20 +72,10 @@ impl BlackBoxDetector {
     pub fn new(image_width: i32, image_height: i32) -> Self {
         let scale_factor = compute_scale_factor(image_height);
 
-        // At 2160p: ROW_OFFSET = 78px, BOX_HEIGHT = 64px
-        let box_height = scale_value(BOX_HEIGHT, scale_factor);
-        let row_offset = scale_value(ROW_OFFSET, scale_factor);
-
-        // row_gap = ROW_OFFSET - BOX_HEIGHT = 14px at 2160p
-        let row_gap = row_offset - box_height;
-
         // Width: 600-1200px at 2160p, scaled with WIDTH_TOLERANCE
         // Uses larger tolerance than pixel alignment to catch bars missed by sampling
         let min_width = scale_value(MIN_WIDTH_2160, scale_factor) - WIDTH_TOLERANCE;
         let max_width = scale_value(MAX_WIDTH_2160, scale_factor) + WIDTH_TOLERANCE;
-
-        // Target height: row_gap + row_offset = 92px at 2160p
-        let target_height = row_gap + row_offset;
 
         // Sample rate: 10 at 2160p, scaled down for lower resolutions (min 5)
         let sample_rate = (scale_value(SAMPLE_RATE_BASE, scale_factor) as usize).max(5);
@@ -101,7 +86,6 @@ impl BlackBoxDetector {
             image_height,
             min_width,
             max_width,
-            target_height,
             sample_rate,
         }
     }
@@ -109,16 +93,6 @@ impl BlackBoxDetector {
     /// Get the scale factor.
     pub fn scale_factor(&self) -> f64 {
         self.scale_factor
-    }
-
-    /// Get filter constraints: (scale_factor, min_width, max_width, min_height).
-    pub fn get_constraints(&self) -> (f64, i32, i32, i32) {
-        (
-            self.scale_factor,
-            self.min_width,
-            self.max_width,
-            self.target_height - PIXEL_DIFF_TOLERANCE,
-        )
     }
 
     /// Detect the stockpile region using sparse row sampling.

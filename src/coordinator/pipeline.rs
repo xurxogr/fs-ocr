@@ -174,61 +174,6 @@ impl ScanPipeline {
         Ok(())
     }
 
-    /// Public wrapper for ensure_initialized (for debug methods).
-    pub fn ensure_initialized_public(&mut self, resolution: i32) -> Result<()> {
-        self.ensure_initialized(resolution)
-    }
-
-    /// Public wrapper for detect_stockpile_regions (for debug methods).
-    pub fn detect_stockpile_regions_public(
-        &self,
-        image: &[u8],
-        width: i32,
-        height: i32,
-    ) -> Result<(crate::detector::DetectedRegions, f64, f64)> {
-        self.detect_stockpile_regions(image, width, height)
-    }
-
-    /// Extract text from a region using English OCR (for debug).
-    #[allow(clippy::too_many_arguments)]
-    pub fn extract_text_from_region_public(
-        &self,
-        image: &[u8],
-        width: i32,
-        height: i32,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-    ) -> Result<String> {
-        let extractor = match &self.text_extractor {
-            Some(e) => e,
-            None => return Ok("(OCR not initialized)".to_string()),
-        };
-
-        let scale_factor = height as f64 / 2160.0;
-        let region_img = extract_region(
-            image,
-            width as usize,
-            height as usize,
-            x.max(0) as usize,
-            y.max(0) as usize,
-            w as usize,
-            h as usize,
-        );
-
-        let (processed, proc_w, proc_h) = preprocess_for_recognizer(
-            &region_img,
-            w as usize,
-            h as usize,
-            1,
-            &PreprocessParams::light_text(scale_factor, 2.0),
-        );
-
-        let text = extractor.extract_text(&processed, proc_w as i32, proc_h as i32, 1)?;
-        Ok(text)
-    }
-
     /// Scan a stockpile screenshot.
     ///
     /// Args:

@@ -38,12 +38,4 @@ impl GameLanguage {
             _ => None,
         }
     }
-
-    /// Whether this language is written in the Latin script (English routing).
-    pub fn is_latin(self) -> bool {
-        matches!(
-            self,
-            Self::English | Self::German | Self::French | Self::Portuguese
-        )
-    }
 }

@@ -16,14 +16,6 @@ scanner.preload(resolution: int = 2160) -> None   # Warm DB + OCR caches
 scanner.is_preloaded() -> bool
 scanner.get_config() / scanner.set_config(config)
 scanner.database_path() / scanner.data_path()
-
-# Debug methods
-scanner.debug_detect_boxes(image) -> List[Tuple[int, int]]            # full-image grey mask
-scanner.debug_detect_boxes_roi(image) -> List[Tuple[int, int]]        # ROI pipeline (real path)
-scanner.debug_detect_black_boxes(image) -> Optional[Tuple[int,int,int,int]]  # ROI bbox
-scanner.debug_detect_all_contours(image) -> List[Tuple[int,int,int,int]]
-scanner.debug_detect_regions(image) -> dict                           # type/name/shard regions
-scanner.debug_recognize_quantities_template(image) -> List[int]
 ```
 
 Note: `image` is `H×W×3` uint8 BGR. Constructor's second arg is `data_path`

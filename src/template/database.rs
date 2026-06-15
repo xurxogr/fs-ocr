@@ -28,9 +28,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use base64::{engine::general_purpose, Engine as _};
-use serde::{Deserialize, Serialize};
-
 use crate::constants::find_closest_resolution;
 use crate::enums::{ItemCategory, ItemFaction};
 use crate::error::{FsOcrError, Result};
@@ -149,20 +146,6 @@ impl IconTemplate {
     pub fn builder() -> IconTemplateBuilder {
         IconTemplateBuilder::new()
     }
-}
-
-/// JSON representation of a template (for fallback loading).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateJson {
-    pub code: String,
-    pub mod_name: String,
-    pub faction: u8,
-    pub category: u8,
-    pub crated: bool,
-    pub phash: u64,
-    pub icon_size: i32,
-    /// Base64-encoded image data (optional, can be loaded from separate files).
-    pub image_base64: Option<String>,
 }
 
 /// Template database for a specific resolution.
@@ -368,50 +351,6 @@ impl TemplateDatabase {
         Ok(db)
     }
 
-    /// Load a template database from a JSON file (fallback format).
-    pub fn load_from_json<P: AsRef<Path>>(path: P, resolution: i32) -> Result<Self> {
-        let path = path.as_ref();
-        if !path.exists() {
-            return Err(FsOcrError::Database(format!(
-                "Database file not found: {}",
-                path.display()
-            )));
-        }
-
-        let contents = std::fs::read_to_string(path)?;
-        let templates_json: Vec<TemplateJson> =
-            serde_json::from_str(&contents).map_err(|e| FsOcrError::Database(e.to_string()))?;
-
-        let closest = find_closest_resolution(resolution);
-        let icon_size = Self::icon_size_for_resolution(closest);
-        let mut db = Self::new(closest, icon_size);
-
-        for tj in templates_json {
-            let image_data = if let Some(b64) = &tj.image_base64 {
-                // Decode base64 image data
-                base64_decode(b64)?
-            } else {
-                // Empty image data placeholder
-                vec![0u8; (icon_size * icon_size * 3) as usize]
-            };
-
-            let template = IconTemplate::builder()
-                .image(image_data, icon_size, icon_size)
-                .code(tj.code)
-                .mod_name(tj.mod_name)
-                .faction(tj.faction.into())
-                .category(tj.category.into())
-                .crated(tj.crated)
-                .phash(tj.phash)
-                .build();
-
-            db.add_template(template);
-        }
-
-        db.rebuild_lookups();
-        Ok(db)
-    }
-
     /// Add a template to the database.
     pub fn add_template(&mut self, template: IconTemplate) {
         let idx = self.templates.len();
@@ -563,13 +502,6 @@ impl TemplateDatabase {
     }
 }
 
-/// Base64 decoding using battle-tested `base64` crate.
-fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    general_purpose::STANDARD
-        .decode(input.trim())
-        .map_err(|e| FsOcrError::Database(format!("Invalid base64: {}", e)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,12 +639,5 @@ mod tests {
         assert_eq!(TemplateDatabase::icon_size_for_resolution(2160), 64);
         assert_eq!(TemplateDatabase::icon_size_for_resolution(1080), 32);
         assert_eq!(TemplateDatabase::icon_size_for_resolution(720), 21);
-    }
-
-    #[test]
-    fn test_base64_decode() {
-        let encoded = "SGVsbG8gV29ybGQ="; // "Hello World"
-        let decoded = base64_decode(encoded).unwrap();
-        assert_eq!(decoded, b"Hello World");
     }
 }
