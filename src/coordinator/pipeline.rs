@@ -1739,23 +1739,52 @@ fn match_shard_name(text: &str) -> Option<&'static str> {
 /// Extract day and hour from in-game timestamp text.
 /// Expects format like "Day 1234, 2056 Hours" -> "1234, 20:56".
 ///
-/// The day/time separator is unreliable across locales: the English client
-/// emits an ASCII comma, the Chinese client a fullwidth comma (`，`), and OCR
-/// sometimes drops it entirely. So we don't depend on it — the time is always
-/// the trailing 4 digits (HHMM) and the day is whatever precedes them.
+/// Every locale separates the day from the time with a comma — ASCII `,` for
+/// Latin/Cyrillic clients, fullwidth `，` (U+FF0C) for Chinese — and it always
+/// falls AFTER any thousands separator inside the day. So we split on the LAST
+/// comma: digits to its left are the day, and the FIRST four digits to its right
+/// are HHMM. Taking the first four (not the trailing four of the whole string)
+/// means digits leaked from a misread trailing marker word — e.g. "Hours" read
+/// as "Hour5" — can't shift the time window.
+///
+/// If OCR drops the separator entirely we fall back to "the last 4 digits are
+/// HHMM, the rest is the day". Either way the result is rejected unless it parses
+/// to a real clock time (HH 00-23, MM 00-59), so a misread digit yields no
+/// timestamp rather than a confidently-wrong one.
 fn extract_day_and_hour(text: &str) -> String {
-    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+    let (day, hhmm) = if let Some(sep) = text.rfind([',', '，']) {
+        let day: String = text[..sep].chars().filter(|c| c.is_ascii_digit()).collect();
+        let hhmm: String = text[sep..]
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .take(4)
+            .collect();
+        (day, hhmm)
+    } else {
+        // No separator: the last 4 digits are HHMM, the rest the day. Needs at
+        // least the 4 time digits plus 1 day digit.
+        let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() < 5 {
+            return String::new();
+        }
+        let split = digits.len() - 4;
+        (digits[..split].to_string(), digits[split..].to_string())
+    };
 
-    // Need at least the 4 time digits plus 1 day digit. Fewer than 5 means we
-    // can't tell the day from the time, so treat it as noise.
-    if digits.len() < 5 {
+    if day.is_empty() || hhmm.len() != 4 {
         return String::new();
     }
 
-    let split = digits.len() - 4;
-    let day = &digits[..split];
-    let hhmm = &digits[split..];
-    format!("{}, {}:{}", day, &hhmm[..2], &hhmm[2..])
+    // The in-game clock is HH 00-23, MM 00-59. A value outside that range means a
+    // digit was misread, so reject the read instead of emitting a wrong time.
+    let (hh, mm) = (&hhmm[..2], &hhmm[2..]);
+    let in_range =
+        hh.parse::<u32>().is_ok_and(|h| h < 24) && mm.parse::<u32>().is_ok_and(|m| m < 60);
+    if !in_range {
+        return String::new();
+    }
+
+    format!("{}, {}:{}", day, hh, mm)
 }
 
 #[cfg(test)]
@@ -1842,6 +1871,30 @@ mod tests {
     }
 
     #[test]
+    fn extracts_day_and_hour_across_latin_locales() {
+        // German/Portuguese use a period thousands separator, so the only comma
+        // is the day/time split; French/English use a comma there. All read the
+        // first 4 digits after the last comma as HHMM.
+        assert_eq!(
+            extract_day_and_hour("Tag 1.293, 1906 Stunden"),
+            "1293, 19:06"
+        );
+        assert_eq!(
+            extract_day_and_hour("Jour 1,293, 1906 Heures"),
+            "1293, 19:06"
+        );
+        assert_eq!(extract_day_and_hour("Dia 1.293, 1906 Horas"), "1293, 19:06");
+    }
+
+    #[test]
+    fn time_ignores_digits_leaked_from_a_misread_marker_word() {
+        // Real misread: "Hours" recognized as "Hour5". Stripping all digits and
+        // taking the trailing 4 used to yield "4181, 03:85"; splitting on the
+        // comma and taking the FIRST 4 digits on the right reads it correctly.
+        assert_eq!(extract_day_and_hour("Day 418, 1038 Hour5"), "418, 10:38");
+    }
+
+    #[test]
     fn extracts_day_and_hour_from_cjk_and_cyrillic_text() {
         // Real in-game formats: Chinese uses a fullwidth comma (`，`, U+FF0C)
         // and the 日/时/分 markers; the day carries a thousands separator. The
@@ -1863,14 +1916,27 @@ mod tests {
 
     #[test]
     fn day_is_unbounded_only_time_is_fixed_width() {
-        // Whatever the digit count, the last 4 are HH:MM and the rest is the day.
-        assert_eq!(extract_day_and_hour("123456789"), "12345, 67:89");
+        // Whatever the day's digit count, the last 4 (no separator) are HH:MM and
+        // the rest is the day — as long as the time is a valid clock value.
+        assert_eq!(
+            extract_day_and_hour("Day 12345, 2030 Hours"),
+            "12345, 20:30"
+        );
     }
 
     #[test]
     fn rejects_timestamp_noise() {
         assert_eq!(extract_day_and_hour(""), "");
         assert_eq!(extract_day_and_hour("0851"), ""); // 4 digits: can't tell day from time
+    }
+
+    #[test]
+    fn rejects_impossible_clock_values() {
+        // A misread digit that makes the time impossible (HH>23 or MM>59) is
+        // rejected rather than emitted as a wrong-but-plausible timestamp.
+        assert_eq!(extract_day_and_hour("Day 418, 1085 Hours"), ""); // MM 85
+        assert_eq!(extract_day_and_hour("Day 418, 2538 Hours"), ""); // HH 25
+        assert_eq!(extract_day_and_hour("123456789"), ""); // no comma -> 67:89, invalid
     }
 
     #[test]
