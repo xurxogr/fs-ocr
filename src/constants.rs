@@ -49,9 +49,6 @@ pub const GRAY_UPPER: u8 = 98;
 /// Pixel coordinate tolerance for box alignment.
 pub const PIXEL_DIFF_TOLERANCE: i32 = 2;
 
-/// Margin for adaptive grey thresholding.
-pub const ADAPTIVE_MARGIN: u8 = 5;
-
 /// Base sample rate for row scanning at 2160p (scales with resolution).
 pub const SAMPLE_RATE_BASE: i32 = 10;
 
@@ -98,36 +95,6 @@ pub const NCC_ESCALATION_THRESHOLD: f64 = 0.90;
 /// comparison is correct. 0.003 lets the tiebreaker fire on those.
 pub const NCC_TIEBREAKER_THRESHOLD: f64 = 0.003;
 
-// =============================================================================
-// Morphological Kernel Sizes
-// =============================================================================
-
-/// Close kernel size (fills small gaps).
-pub const CLOSE_KERNEL_SIZE: i32 = 3;
-
-/// Open kernel size (separates merged boxes).
-pub const OPEN_KERNEL_SIZE: i32 = 5;
-
-// =============================================================================
-// OCR Configuration
-// =============================================================================
-
-/// Default upscale factor for quantity OCR.
-pub const QUANTITY_UPSCALE_FACTOR: f64 = 2.0;
-
-/// Upscale factor for text regions (type, name, etc.).
-pub const TEXT_UPSCALE_FACTOR: f64 = 4.0;
-
-/// Minimum standard deviation for tab button contrast detection.
-pub const TAB_CONTRAST_THRESHOLD: f64 = 30.0;
-
-// =============================================================================
-// Number of columns in stockpile grid
-// =============================================================================
-
-/// Number of columns in the stockpile grid.
-pub const GRID_COLUMNS: usize = 6;
-
 /// Width of stockpile type region (4x box_width at 2160p).
 pub const STOCKPILE_TYPE_WIDTH_FACTOR: f64 = 4.0;
 
@@ -147,13 +114,6 @@ pub const STOCKPILE_NAME_WIDTH_FACTOR: f64 = 2.5;
 
 /// Shard width factor (3.5x box_width at 2160p).
 pub const SHARD_WIDTH_FACTOR: f64 = 3.5;
-
-// =============================================================================
-// Info Bar Heights (for stockpile type detection)
-// =============================================================================
-
-/// Height of the grey separator bar at 2160p.
-pub const GREY_BAR_HEIGHT: i32 = 6;
 
 // =============================================================================
 // Supported Resolutions

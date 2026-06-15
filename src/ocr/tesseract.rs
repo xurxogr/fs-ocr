@@ -63,11 +63,6 @@ impl ChineseNameReader {
         }
     }
 
-    /// Whether the `tesseract` binary was found.
-    pub fn is_available(&self) -> bool {
-        self.available
-    }
-
     /// Read a single line of Chinese text from a grayscale name crop.
     ///
     /// `gray` is the recognizer-preprocessed buffer (light text on a dark
@@ -154,7 +149,6 @@ mod tests {
             lang: DEFAULT_LANG.to_string(),
             available: false,
         };
-        assert!(!reader.is_available());
         assert!(reader.read(&[0u8; 16], 4, 4).is_none());
     }
 }

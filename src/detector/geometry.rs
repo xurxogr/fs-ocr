@@ -37,8 +37,6 @@ pub struct DetectedRegions {
     pub scale_factor: f64,
     /// Vertical resolution of the image.
     pub vertical_resolution: i32,
-    /// Whether the first row has only a single item.
-    pub has_single_item_first_row: bool,
     /// Region for stockpile type text.
     pub type_region: Option<BoundingRect>,
     /// Region for stockpile name text.
@@ -67,7 +65,6 @@ impl DetectedRegions {
             groups: Vec::new(),
             scale_factor,
             vertical_resolution,
-            has_single_item_first_row: false,
             type_region: None,
             name_region: None,
             shard_region: None,
@@ -75,15 +72,5 @@ impl DetectedRegions {
             box_height,
             info_bar_height: 0,
         }
-    }
-
-    /// Get the total number of detected items.
-    pub fn item_count(&self) -> usize {
-        self.quantity_boxes.len()
-    }
-
-    /// Check if any items were detected.
-    pub fn is_empty(&self) -> bool {
-        self.quantity_boxes.is_empty()
     }
 }

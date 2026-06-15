@@ -83,11 +83,6 @@ impl GreyMaskDetector {
         }
     }
 
-    /// Get the scale factor.
-    pub fn scale_factor(&self) -> f64 {
-        self.scale_factor
-    }
-
     /// Detect quantity boxes in an RGB image.
     ///
     /// Args:

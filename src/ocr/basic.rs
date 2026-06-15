@@ -225,35 +225,11 @@ impl OcrEngine for OcrsEngine {
 
         Ok(filtered.trim().to_string())
     }
-
-    fn is_available(&self) -> bool {
-        self.available
-    }
-
-    fn supports_multilingual(&self) -> bool {
-        // ocrs only supports Latin script
-        false
-    }
-
-    fn engine_name(&self) -> &'static str {
-        "ocrs"
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_ocrs_engine_uses_embedded_model_fallback() {
-        // With no model file in the data path, the engine falls back to the
-        // model embedded in the binary, so it is still available.
-        let config = OcrConfig::for_quantities("nonexistent_path");
-        let engine = OcrsEngine::new(config).unwrap();
-        assert!(engine.is_available());
-        assert!(!engine.supports_multilingual());
-        assert_eq!(engine.engine_name(), "ocrs");
-    }
 
     #[test]
     fn test_extract_text_blank_returns_empty() {

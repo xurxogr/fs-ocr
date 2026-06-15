@@ -40,10 +40,6 @@ pub const DATABASE_VERSION: u32 = 2;
 pub struct IconTemplate {
     /// Pre-rendered icon image data (H x W x 3, RGB, row-major).
     pub image_data: Vec<u8>,
-    /// Image width.
-    pub width: i32,
-    /// Image height.
-    pub height: i32,
     /// Item code identifier.
     pub code: String,
     /// Mod name (e.g., "vanilla", "airborne").
@@ -56,16 +52,12 @@ pub struct IconTemplate {
     pub crated: bool,
     /// Perceptual hash for fast filtering.
     pub phash: u64,
-    /// Icon size (width/height, typically equal).
-    pub icon_size: i32,
 }
 
 /// Builder for creating IconTemplate instances.
 #[derive(Debug, Default)]
 pub struct IconTemplateBuilder {
     image_data: Vec<u8>,
-    width: i32,
-    height: i32,
     code: String,
     mod_name: String,
     faction: ItemFaction,
@@ -80,11 +72,9 @@ impl IconTemplateBuilder {
         Self::default()
     }
 
-    /// Set the image data and dimensions.
-    pub fn image(mut self, data: Vec<u8>, width: i32, height: i32) -> Self {
+    /// Set the image data.
+    pub fn image(mut self, data: Vec<u8>) -> Self {
         self.image_data = data;
-        self.width = width;
-        self.height = height;
         self
     }
 
@@ -128,15 +118,12 @@ impl IconTemplateBuilder {
     pub fn build(self) -> IconTemplate {
         IconTemplate {
             image_data: self.image_data,
-            width: self.width,
-            height: self.height,
             code: self.code,
             mod_name: self.mod_name,
             faction: self.faction,
             category: self.category,
             crated: self.crated,
             phash: self.phash,
-            icon_size: self.width,
         }
     }
 }
@@ -163,8 +150,6 @@ pub struct TemplateDatabase {
     pub mod_lookup: HashMap<String, HashSet<usize>>,
     /// All pHashes as a contiguous array for vectorized operations.
     pub phash_array: Vec<u64>,
-    /// Icon size for this resolution.
-    pub icon_size: i32,
     // === Precomputed NCC statistics (computed on load for fast matching) ===
     /// Mean of each template's pixels.
     pub ncc_means: Vec<f32>,
@@ -174,7 +159,7 @@ pub struct TemplateDatabase {
 
 impl TemplateDatabase {
     /// Create an empty template database.
-    pub fn new(resolution: i32, icon_size: i32) -> Self {
+    pub fn new(resolution: i32) -> Self {
         Self {
             resolution,
             templates: Vec::new(),
@@ -182,7 +167,6 @@ impl TemplateDatabase {
             category_lookup: HashMap::new(),
             mod_lookup: HashMap::new(),
             phash_array: Vec::new(),
-            icon_size,
             ncc_means: Vec::new(),
             ncc_inv_stds: Vec::new(),
         }
@@ -226,7 +210,6 @@ impl TemplateDatabase {
 
         // Find closest supported resolution
         let closest = find_closest_resolution(resolution);
-        let icon_size = Self::icon_size_for_resolution(closest);
 
         // Open HDF5 file
         let file = hdf5::File::open(path)
@@ -262,10 +245,10 @@ impl TemplateDatabase {
             .unwrap_or(0);
 
         if template_count == 0 {
-            return Ok(Self::new(closest, icon_size));
+            return Ok(Self::new(closest));
         }
 
-        let mut db = Self::new(closest, icon_size);
+        let mut db = Self::new(closest);
 
         // Load datasets
         let images_ds = group
@@ -335,7 +318,7 @@ impl TemplateDatabase {
             let phash = phashes[i];
 
             let template = IconTemplate::builder()
-                .image(image_data, img_w, img_h)
+                .image(image_data)
                 .code(code)
                 .mod_name(mod_name)
                 .faction(faction)
@@ -440,16 +423,6 @@ impl TemplateDatabase {
         candidates
     }
 
-    /// Get the number of templates.
-    pub fn len(&self) -> usize {
-        self.templates.len()
-    }
-
-    /// Check if the database is empty.
-    pub fn is_empty(&self) -> bool {
-        self.templates.is_empty()
-    }
-
     /// Rebuild lookup tables after adding templates.
     pub fn rebuild_lookups(&mut self) {
         self.faction_lookup.clear();
@@ -480,26 +453,6 @@ impl TemplateDatabase {
             self.ncc_inv_stds.push(inv_std);
         }
     }
-
-    /// Compute Hamming distances between an icon pHash and all candidates.
-    pub fn get_phash_distances(&self, icon_phash: u64, candidate_indices: &[usize]) -> Vec<u32> {
-        candidate_indices
-            .iter()
-            .map(|&i| {
-                let template_phash = self.phash_array[i];
-                (icon_phash ^ template_phash).count_ones()
-            })
-            .collect()
-    }
-
-    /// Get the expected icon size for a resolution.
-    fn icon_size_for_resolution(resolution: i32) -> i32 {
-        // Scale proportionally from base resolution
-        // At 2160p, icon size is 64px (64/2160 scaling factor)
-        let base_icon_size = 64.0;
-        let base_resolution = 2160.0;
-        ((resolution as f64 / base_resolution) * base_icon_size).round() as i32
-    }
 }
 
 #[cfg(test)]
@@ -507,25 +460,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_empty_database() {
-        let db = TemplateDatabase::new(2160, 64);
-        assert!(db.is_empty());
-        assert_eq!(db.len(), 0);
-    }
-
-    #[test]
     fn test_get_candidates_empty() {
-        let db = TemplateDatabase::new(2160, 64);
+        let db = TemplateDatabase::new(2160);
         let candidates = db.get_candidates(None, None, None, None, None);
         assert!(candidates.is_empty());
     }
 
     #[test]
     fn test_add_template() {
-        let mut db = TemplateDatabase::new(2160, 64);
+        let mut db = TemplateDatabase::new(2160);
 
         let template = IconTemplate::builder()
-            .image(vec![0u8; 64 * 64 * 3], 64, 64)
+            .image(vec![0u8; 64 * 64 * 3])
             .code("rifle_001")
             .mod_name("vanilla")
             .faction(ItemFaction::Neutral)
@@ -536,8 +482,7 @@ mod tests {
 
         db.add_template(template);
 
-        assert_eq!(db.len(), 1);
-        assert!(!db.is_empty());
+        assert_eq!(db.templates.len(), 1);
         assert!(db.faction_lookup.contains_key(&ItemFaction::Neutral));
         assert!(db.category_lookup.contains_key(&ItemCategory::Item));
         assert!(db.mod_lookup.contains_key("vanilla"));
@@ -545,12 +490,12 @@ mod tests {
 
     #[test]
     fn test_filter_by_faction() {
-        let mut db = TemplateDatabase::new(2160, 64);
+        let mut db = TemplateDatabase::new(2160);
 
         // Add neutral item
         db.add_template(
             IconTemplate::builder()
-                .image(vec![], 64, 64)
+                .image(vec![])
                 .code("neutral_item")
                 .mod_name("vanilla")
                 .faction(ItemFaction::Neutral)
@@ -563,7 +508,7 @@ mod tests {
         // Add colonial item
         db.add_template(
             IconTemplate::builder()
-                .image(vec![], 64, 64)
+                .image(vec![])
                 .code("colonial_item")
                 .mod_name("vanilla")
                 .faction(ItemFaction::Colonials)
@@ -576,7 +521,7 @@ mod tests {
         // Add warden item
         db.add_template(
             IconTemplate::builder()
-                .image(vec![], 64, 64)
+                .image(vec![])
                 .code("warden_item")
                 .mod_name("vanilla")
                 .faction(ItemFaction::Wardens)
@@ -597,47 +542,5 @@ mod tests {
         // No filter should return all
         let candidates = db.get_candidates(None, None, None, None, None);
         assert_eq!(candidates.len(), 3);
-    }
-
-    #[test]
-    fn test_phash_distances() {
-        let mut db = TemplateDatabase::new(2160, 64);
-
-        db.add_template(
-            IconTemplate::builder()
-                .image(vec![], 64, 64)
-                .code("item1")
-                .mod_name("vanilla")
-                .faction(ItemFaction::Neutral)
-                .category(ItemCategory::Item)
-                .crated(false)
-                .phash(0b1111_0000_1111_0000) // phash
-                .build(),
-        );
-
-        db.add_template(
-            IconTemplate::builder()
-                .image(vec![], 64, 64)
-                .code("item2")
-                .mod_name("vanilla")
-                .faction(ItemFaction::Neutral)
-                .category(ItemCategory::Item)
-                .crated(false)
-                .phash(0b1111_0000_1111_0001) // 1 bit different
-                .build(),
-        );
-
-        let icon_phash = 0b1111_0000_1111_0000u64;
-        let distances = db.get_phash_distances(icon_phash, &[0, 1]);
-
-        assert_eq!(distances[0], 0); // Exact match
-        assert_eq!(distances[1], 1); // 1 bit different
-    }
-
-    #[test]
-    fn test_icon_size_scaling() {
-        assert_eq!(TemplateDatabase::icon_size_for_resolution(2160), 64);
-        assert_eq!(TemplateDatabase::icon_size_for_resolution(1080), 32);
-        assert_eq!(TemplateDatabase::icon_size_for_resolution(720), 21);
     }
 }

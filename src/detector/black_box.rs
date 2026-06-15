@@ -33,8 +33,6 @@ const VALID_WIDTHS_2160: [i32; 5] = [600, 612, 808, 1004, 1200];
 pub struct BlackBoxResult {
     /// Bounding region of the detected stockpile area (with padding).
     pub roi: BoundingRect,
-    /// Scale factor used for detection.
-    pub scale_factor: f64,
 }
 
 /// A horizontal run of black pixels.
@@ -90,11 +88,6 @@ impl BlackBoxDetector {
         }
     }
 
-    /// Get the scale factor.
-    pub fn scale_factor(&self) -> f64 {
-        self.scale_factor
-    }
-
     /// Detect the stockpile region using sparse row sampling.
     ///
     /// Algorithm:
@@ -111,6 +104,38 @@ impl BlackBoxDetector {
         let h = height as usize;
 
         // Step 1: Sample rows for valid black runs (600-1200px at 2160p, scaled)
+        let all_runs = self.find_black_runs(image, w, h);
+        if all_runs.is_empty() {
+            return Ok(None);
+        }
+
+        // Step 2: Group runs by X overlap/adjacency, then pick the group with the
+        // most runs (the stockpile).
+        let groups = Self::group_runs_by_x(all_runs);
+        let best_group = match groups.iter().max_by_key(|g| g.len()) {
+            Some(g) => g,
+            None => return Ok(None),
+        };
+
+        // Step 3: Compute the ROI bounding box from the best group, or bail if it
+        // is shorter than the minimum stockpile height.
+        match self.compute_roi(image, w, h, best_group) {
+            Some(roi) => Ok(Some(BlackBoxResult { roi })),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether the pixel at byte offset `idx` (RGB triplet) is black.
+    #[inline]
+    fn is_black_pixel(image: &[u8], idx: usize) -> bool {
+        image[idx] < BLACK_THRESHOLD
+            && image[idx + 1] < BLACK_THRESHOLD
+            && image[idx + 2] < BLACK_THRESHOLD
+    }
+
+    /// Sample every `sample_rate`-th row and collect horizontal black runs whose
+    /// width falls inside the valid stockpile band (600-1200px at 2160p, scaled).
+    fn find_black_runs(&self, image: &[u8], w: usize, h: usize) -> Vec<BlackRun> {
         let mut all_runs: Vec<BlackRun> = Vec::new();
 
         for y in (0..h).step_by(self.sample_rate) {
@@ -119,9 +144,7 @@ impl BlackBoxDetector {
 
             for x in 0..w {
                 let idx = (y * w + x) * 3;
-                let is_black = image[idx] < BLACK_THRESHOLD
-                    && image[idx + 1] < BLACK_THRESHOLD
-                    && image[idx + 2] < BLACK_THRESHOLD;
+                let is_black = Self::is_black_pixel(image, idx);
 
                 if is_black && !in_run {
                     in_run = true;
@@ -151,14 +174,15 @@ impl BlackBoxDetector {
             }
         }
 
-        if all_runs.is_empty() {
-            return Ok(None);
-        }
+        all_runs
+    }
 
-        // Step 2: Group runs by X overlap/adjacency (merges multi-column stockpiles)
-        // Tolerance of 200px accounts for icons/gaps between columns
-        // IMPORTANT: Compare against individual runs, not the group bounding box,
-        // to prevent "chaining" where distant runs get grouped through intermediates.
+    /// Group runs by X overlap/adjacency (merges multi-column stockpiles).
+    ///
+    /// Tolerance of 200px accounts for icons/gaps between columns.
+    /// IMPORTANT: Compare against individual runs, not the group bounding box,
+    /// to prevent "chaining" where distant runs get grouped through intermediates.
+    fn group_runs_by_x(all_runs: Vec<BlackRun>) -> Vec<Vec<BlackRun>> {
         const X_ADJACENCY_TOLERANCE: i32 = 200;
         let mut groups: Vec<Vec<BlackRun>> = Vec::new();
 
@@ -187,12 +211,22 @@ impl BlackBoxDetector {
             }
         }
 
-        // Step 3: Pick the group with most runs (this is the stockpile)
-        let best_group = match groups.iter().max_by_key(|g| g.len()) {
-            Some(g) => g,
-            None => return Ok(None),
-        };
+        groups
+    }
 
+    /// Compute the padded ROI bounding box from the runs in `best_group`.
+    ///
+    /// Extends the group's bounding box left/right along its middle row and
+    /// up/down (tolerating small info-bar separator gaps) until non-black pixels
+    /// are reached, then snaps the width to a valid stockpile width. Returns
+    /// `None` when the resulting height is below the minimum stockpile height.
+    fn compute_roi(
+        &self,
+        image: &[u8],
+        w: usize,
+        h: usize,
+        best_group: &[BlackRun],
+    ) -> Option<BoundingRect> {
         // Compute bounding box from all runs in the group
         let mut roi_x = best_group.iter().map(|r| r.x).min().unwrap();
         let roi_x_end = best_group.iter().map(|r| r.x + r.width).max().unwrap();
@@ -200,16 +234,13 @@ impl BlackBoxDetector {
         let last_bar_y = best_group.iter().map(|r| r.y).max().unwrap();
         let mut roi_w = roi_x_end - roi_x;
 
-        // Step 4: Extend left/right from middle row until non-black
+        // Extend left/right from middle row until non-black
         let mid_y = ((first_bar_y + last_bar_y) / 2) as usize;
 
         // Extend LEFT
         for x in (0..roi_x as usize).rev() {
             let idx = (mid_y * w + x) * 3;
-            if image[idx] < BLACK_THRESHOLD
-                && image[idx + 1] < BLACK_THRESHOLD
-                && image[idx + 2] < BLACK_THRESHOLD
-            {
+            if Self::is_black_pixel(image, idx) {
                 roi_x = x as i32;
             } else {
                 break;
@@ -219,17 +250,14 @@ impl BlackBoxDetector {
         // Extend RIGHT
         for x in (roi_x_end as usize)..w {
             let idx = (mid_y * w + x) * 3;
-            if image[idx] < BLACK_THRESHOLD
-                && image[idx + 1] < BLACK_THRESHOLD
-                && image[idx + 2] < BLACK_THRESHOLD
-            {
+            if Self::is_black_pixel(image, idx) {
                 roi_w = (x as i32 + 1) - roi_x;
             } else {
                 break;
             }
         }
 
-        // Step 5: Extend UP from first bar until non-black
+        // Extend UP from first bar until non-black
         // Allow small gaps (info bar separators) of up to 6px at 2160p, min 3px
         let max_gap = scale_value(6, self.scale_factor).max(3) as usize;
         let check_x = (roi_x + roi_w / 2) as usize;
@@ -240,9 +268,7 @@ impl BlackBoxDetector {
                 break;
             }
             let idx = (check_y * w + check_x) * 3;
-            let is_black = image[idx] < BLACK_THRESHOLD
-                && image[idx + 1] < BLACK_THRESHOLD
-                && image[idx + 2] < BLACK_THRESHOLD;
+            let is_black = Self::is_black_pixel(image, idx);
 
             if is_black {
                 y_start = check_y as i32;
@@ -255,7 +281,7 @@ impl BlackBoxDetector {
             }
         }
 
-        // Step 6: Extend DOWN from last bar until non-black
+        // Extend DOWN from last bar until non-black
         let mut y_end = last_bar_y;
         let mut gap_count = 0usize;
         for check_y in (last_bar_y as usize + 1)..h {
@@ -263,9 +289,7 @@ impl BlackBoxDetector {
                 break;
             }
             let idx = (check_y * w + check_x) * 3;
-            let is_black = image[idx] < BLACK_THRESHOLD
-                && image[idx + 1] < BLACK_THRESHOLD
-                && image[idx + 2] < BLACK_THRESHOLD;
+            let is_black = Self::is_black_pixel(image, idx);
 
             if is_black {
                 y_end = check_y as i32;
@@ -283,7 +307,7 @@ impl BlackBoxDetector {
         // Minimum height check (30px at 2160p, scaled)
         let min_height = scale_value(30, self.scale_factor);
         if roi_h < min_height {
-            return Ok(None);
+            return None;
         }
 
         // Snap width to valid stockpile width
@@ -291,12 +315,7 @@ impl BlackBoxDetector {
         let final_roi_w = snapped_width.min(self.image_width - roi_x);
         let final_roi_h = roi_h.min(self.image_height - y_start);
 
-        let roi = (roi_x.max(0), y_start.max(0), final_roi_w, final_roi_h);
-
-        Ok(Some(BlackBoxResult {
-            roi,
-            scale_factor: self.scale_factor,
-        }))
+        Some((roi_x.max(0), y_start.max(0), final_roi_w, final_roi_h))
     }
 
     /// Snap a detected width to the nearest valid stockpile width.

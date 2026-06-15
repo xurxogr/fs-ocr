@@ -179,39 +179,6 @@ pub fn filter_by_phash(
     matches
 }
 
-/// Compute pHash from grayscale image data (matches Python exactly).
-///
-/// Args:
-///     grayscale: 8-bit grayscale image data
-///     width: Image width
-///     height: Image height
-///
-/// Returns:
-///     64-bit perceptual hash
-pub fn compute_phash_grayscale(grayscale: &[u8], width: usize, height: usize) -> u64 {
-    if grayscale.is_empty() || width == 0 || height == 0 {
-        return 0;
-    }
-
-    // Step 1: Resize to 8x8 using INTER_AREA interpolation
-    let resized = resize_inter_area(grayscale, width, height, HASH_SIZE, HASH_SIZE);
-
-    // Step 2: Compute average (using f64 for precision like numpy.mean())
-    let sum: f64 = resized.iter().map(|&x| x as f64).sum();
-    let avg = sum / 64.0;
-
-    // Step 3: Generate hash (1 if pixel > avg, 0 otherwise)
-    // IMPORTANT: Python uses strictly greater (>), not greater-or-equal (>=)
-    let mut hash: u64 = 0;
-    for (i, &pixel) in resized.iter().enumerate() {
-        if (pixel as f64) > avg {
-            hash |= 1 << (63 - i);
-        }
-    }
-
-    hash
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,14 +263,6 @@ mod tests {
         // Similar images should have low Hamming distance
         let distance = hamming_distance(hash1, hash2);
         assert!(distance < 10, "Distance {} should be small", distance);
-    }
-
-    #[test]
-    fn test_compute_phash_grayscale() {
-        let gray: Vec<u8> = vec![128; 64 * 64];
-        let hash = compute_phash_grayscale(&gray, 64, 64);
-        // Uniform gray image - with ">" comparison, all pixels equal average, so hash = 0
-        assert_eq!(hash, 0);
     }
 
     #[test]

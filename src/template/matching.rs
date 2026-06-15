@@ -47,24 +47,6 @@ impl<'a> MatchFilter<'a> {
         self.category = category;
         self
     }
-
-    /// Filter by crated status.
-    pub fn crated(mut self, crated: Option<bool>) -> Self {
-        self.crated = crated;
-        self
-    }
-
-    /// Filter by mod name.
-    pub fn mod_name(mut self, mod_name: Option<&'a str>) -> Self {
-        self.mod_name = mod_name;
-        self
-    }
-
-    /// Exclude specific item codes.
-    pub fn excluded_codes(mut self, excluded: Option<&'a HashSet<String>>) -> Self {
-        self.excluded_codes = excluded;
-        self
-    }
 }
 
 /// Result of template matching for a single icon.
@@ -74,10 +56,6 @@ pub struct MatchResult {
     pub best_match: Option<IconTemplate>,
     /// Confidence of the best match (0.0 - 1.0).
     pub confidence: f64,
-    /// Number of candidates tested with NCC.
-    pub tested_candidates: usize,
-    /// Top N matches with confidence scores.
-    pub top_matches: Vec<(IconTemplate, f64)>,
     /// Alternative candidates within confidence gap.
     pub gap_candidates: Vec<(IconTemplate, f64)>,
 }
@@ -88,23 +66,8 @@ impl MatchResult {
         Self {
             best_match: None,
             confidence: 0.0,
-            tested_candidates: 0,
-            top_matches: Vec::new(),
             gap_candidates: Vec::new(),
         }
-    }
-
-    /// Check if a match was found.
-    pub fn is_matched(&self) -> bool {
-        self.best_match.is_some()
-    }
-
-    /// Get the matched code (or "Unknown").
-    pub fn code(&self) -> &str {
-        self.best_match
-            .as_ref()
-            .map(|t| t.code.as_str())
-            .unwrap_or("Unknown")
     }
 }
 
@@ -130,8 +93,6 @@ pub struct TemplateMatcher {
     ncc_initial_candidates: usize,
     /// Confidence floor below which the candidate count is escalated.
     ncc_escalation_threshold: f64,
-    /// Number of top matches to keep.
-    top_n: usize,
 }
 
 impl TemplateMatcher {
@@ -154,7 +115,6 @@ impl TemplateMatcher {
             ncc_tiebreaker_threshold,
             ncc_initial_candidates,
             ncc_escalation_threshold,
-            top_n: 5,
         }
     }
 
@@ -229,14 +189,7 @@ impl TemplateMatcher {
                             template_inv_std,
                         ) as f64
                     } else {
-                        compute_ncc(
-                            icon_image,
-                            icon_width as usize,
-                            icon_height as usize,
-                            &template.image_data,
-                            template.width as usize,
-                            template.height as usize,
-                        )
+                        compute_ncc(icon_image, &template.image_data)
                     };
                     (idx, confidence)
                 })
@@ -301,13 +254,6 @@ impl TemplateMatcher {
 
         let best_template = self.database.templates[best_idx].clone();
 
-        // Get top N matches
-        let top_matches: Vec<(IconTemplate, f64)> = all_matches
-            .iter()
-            .take(self.top_n)
-            .map(|&(idx, conf)| (self.database.templates[idx].clone(), conf))
-            .collect();
-
         // Get gap candidates
         let gap_candidates: Vec<(IconTemplate, f64)> = if self.confidence_gap > 0.0 {
             all_matches
@@ -323,15 +269,8 @@ impl TemplateMatcher {
         Ok(MatchResult {
             best_match: Some(best_template),
             confidence: best_confidence,
-            tested_candidates: all_matches.len(),
-            top_matches,
             gap_candidates,
         })
-    }
-
-    /// Get the template database.
-    pub fn database(&self) -> &TemplateDatabase {
-        &self.database
     }
 }
 
@@ -340,14 +279,7 @@ impl TemplateMatcher {
 /// Pure Rust implementation for maximum performance.
 /// Returns a value between -1.0 and 1.0, where 1.0 is a perfect match.
 #[inline]
-pub fn compute_ncc(
-    image: &[u8],
-    _image_width: usize,
-    _image_height: usize,
-    template: &[u8],
-    _template_width: usize,
-    _template_height: usize,
-) -> f64 {
+pub(crate) fn compute_ncc(image: &[u8], template: &[u8]) -> f64 {
     // Fast path: same size images (most common case)
     if image.len() == template.len() && !image.is_empty() {
         return ncc_same_size(image, template);
@@ -504,8 +436,7 @@ mod tests {
     #[test]
     fn test_empty_match_result() {
         let result = MatchResult::empty();
-        assert!(!result.is_matched());
-        assert_eq!(result.code(), "Unknown");
+        assert!(result.best_match.is_none());
         assert_eq!(result.confidence, 0.0);
     }
 
@@ -513,7 +444,7 @@ mod tests {
     fn test_ncc_identical_images() {
         // Use a non-uniform image (gradient) for meaningful NCC
         let image: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 256) as u8).collect();
-        let ncc = compute_ncc(&image, 64, 64, &image, 64, 64);
+        let ncc = compute_ncc(&image, &image);
         assert!(
             (ncc - 1.0).abs() < 0.001,
             "NCC should be 1.0 for identical images, got {}",
@@ -526,7 +457,7 @@ mod tests {
         let image1: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 256) as u8).collect();
         let image2: Vec<u8> = image1.iter().map(|&x| 255 - x).collect();
 
-        let ncc = compute_ncc(&image1, 64, 64, &image2, 64, 64);
+        let ncc = compute_ncc(&image1, &image2);
         assert!(ncc < 0.0, "NCC should be negative for inverse images");
     }
 
@@ -541,7 +472,7 @@ mod tests {
             image2[i] = 132;
         }
 
-        let ncc = compute_ncc(&image1, 64, 64, &image2, 64, 64);
+        let ncc = compute_ncc(&image1, &image2);
         assert!(ncc > 0.9, "NCC should be high for similar images: {}", ncc);
     }
 
@@ -551,7 +482,7 @@ mod tests {
         let image2: Vec<u8> = vec![128u8; 32 * 32 * 3];
 
         // Different sizes now return 0 (templates should be pre-scaled)
-        let ncc = compute_ncc(&image1, 64, 64, &image2, 32, 32);
+        let ncc = compute_ncc(&image1, &image2);
         assert_eq!(ncc, 0.0);
     }
 }

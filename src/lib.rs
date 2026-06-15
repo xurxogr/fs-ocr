@@ -25,17 +25,23 @@ use numpy::{PyReadonlyArray3, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-pub mod config;
-pub mod constants;
-pub mod coordinator;
-pub mod detector;
-pub mod enums;
-pub mod error;
-pub mod image_utils;
-pub mod models;
-pub mod ocr;
-pub mod template;
-pub mod text_utils;
+// Public API surface. Keep this minimal and intentional: only the types a
+// consumer needs to drive a scan and read its result. Everything else is a
+// crate-internal implementation detail (see the `mod` declarations below).
+pub mod config; // ScanConfig
+pub mod coordinator; // ScanPipeline
+pub mod enums; // ItemFaction, ItemCategory, StockpileType, GameLanguage
+pub mod error; // FsOcrError, Result (returned by the public API)
+pub mod models; // Stockpile and friends (scan result types)
+
+// Crate-internal implementation modules — reachable via `crate::` paths but not
+// part of the published API.
+mod constants;
+mod detector;
+mod image_utils;
+mod ocr;
+mod template;
+mod text_utils;
 
 #[cfg(feature = "python")]
 use config::ScanConfig;
