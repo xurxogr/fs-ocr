@@ -24,7 +24,7 @@ python = ["dep:pyo3", "dep:numpy"]
 # libhdf5. Enabled in CI wheel builds so published wheels carry no external
 # libhdf5 dependency. Local dev builds keep using the system library (faster).
 # Requires CMake + a C/C++ compiler at build time.
-static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib"]
+static-hdf5 = ["hdf5-sys/static", "hdf5-sys/zlib", "dep:libz-sys"]
 
 [dependencies]
 pyo3 = { version = "0.24", optional = true, features = ["abi3-py310"] }
@@ -46,6 +46,16 @@ hdf5 = "0.8"
 # Direct handle on hdf5-sys so the `static-hdf5` feature can build libhdf5 (+ its
 # zlib filter) from source. Unifies with the hdf5 crate's own hdf5-sys dep.
 hdf5-sys = "0.8"
+# Only pulled in by `static-hdf5`. hdf5-src requests libz-sys with
+# default-features=false (features = ["static"]), which leaves libz-sys's `libc`
+# feature OFF and so compiles bundled zlib with `-DZ_SOLO`. Z_SOLO strips zlib's
+# default allocator (zcalloc/zcfree), and HDF5's deflate filter initializes a
+# zeroed z_stream (NULL zalloc), so `inflateInit()` returns Z_STREAM_ERROR and
+# reading any gzip-compressed dataset fails with "inflateInit() failed".
+# Depending on libz-sys here with its default `libc` (+ `stock-zlib`) feature
+# unifies it across the graph, drops Z_SOLO, and restores the allocator.
+# See aldanor/hdf5-rust#206.
+libz-sys = { version = "1.1", features = ["static"], optional = true }
 
 # Pure Rust OCR (ocrs) - always included
 ocrs = "0.11"
