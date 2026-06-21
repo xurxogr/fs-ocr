@@ -73,6 +73,16 @@ pub struct StockpileItem {
     #[serde(serialize_with = "serialize_confidence")]
     pub confidence: f64,
 
+    /// X coordinate (pixels) of the icon region's top-left corner in the
+    /// source screenshot.
+    #[serde(default)]
+    pub x: i32,
+
+    /// Y coordinate (pixels) of the icon region's top-left corner in the
+    /// source screenshot.
+    #[serde(default)]
+    pub y: i32,
+
     /// Alternative candidates within the confidence gap (if configured).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidates: Option<Vec<ItemCandidate>>,
@@ -92,6 +102,8 @@ impl StockpileItem {
             quantity,
             crated,
             confidence,
+            x: 0,
+            y: 0,
             candidates,
         }
     }
@@ -103,8 +115,15 @@ impl StockpileItem {
             quantity,
             crated,
             confidence: 0.0,
+            x: 0,
+            y: 0,
             candidates: None,
         }
+    }
+
+    /// Return a copy of this item positioned at the given icon coordinates.
+    pub fn with_position(self, x: i32, y: i32) -> Self {
+        Self { x, y, ..self }
     }
 
     /// Check if this item was successfully matched.
@@ -156,6 +175,16 @@ impl StockpileItem {
     }
 
     #[getter]
+    fn x(&self) -> i32 {
+        self.x
+    }
+
+    #[getter]
+    fn y(&self) -> i32 {
+        self.y
+    }
+
+    #[getter]
     fn candidates(&self) -> Option<Vec<ItemCandidate>> {
         self.candidates.clone()
     }
@@ -173,8 +202,8 @@ impl StockpileItem {
 
     fn __repr__(&self) -> String {
         format!(
-            "StockpileItem(code='{}', quantity={}, crated={}, confidence={:.4})",
-            self.code, self.quantity, self.crated, self.confidence
+            "StockpileItem(code='{}', quantity={}, crated={}, confidence={:.4}, x={}, y={})",
+            self.code, self.quantity, self.crated, self.confidence, self.x, self.y
         )
     }
 }

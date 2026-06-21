@@ -727,7 +727,8 @@ impl ScanPipeline {
                     .enumerate()
                     .map(|(i, &qty)| {
                         let crated = self.detect_crated_from_group(i, &regions.groups);
-                        StockpileItem::unknown(qty, crated)
+                        let (x, y) = icon_position(regions, i);
+                        StockpileItem::unknown(qty, crated).with_position(x, y)
                     })
                     .collect());
             }
@@ -860,6 +861,17 @@ impl ScanPipeline {
             items[item_idx] = item;
         }
 
+        // Stamp every item with the top-left coordinates of its icon region so
+        // callers can map results back to positions in the source screenshot.
+        let items = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let (x, y) = icon_position(regions, i);
+                item.with_position(x, y)
+            })
+            .collect();
+
         Ok(items)
     }
 
@@ -972,6 +984,15 @@ impl ScanPipeline {
 
         Ok((regions, blackbox_ms, greymask_ms))
     }
+}
+
+/// Top-left `(x, y)` of the icon region at `index`, or `(0, 0)` if absent.
+fn icon_position(regions: &crate::detector::DetectedRegions, index: usize) -> (i32, i32) {
+    regions
+        .icon_regions
+        .get(index)
+        .map(|&(x, y, _, _)| (x, y))
+        .unwrap_or((0, 0))
 }
 
 /// Build a matched StockpileItem from a successful match result.
