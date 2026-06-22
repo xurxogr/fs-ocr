@@ -6,6 +6,7 @@ real declarations live in ``_fs_ocr.pyi``.
 
 from ._fs_ocr import (
     OCR_BACKEND as OCR_BACKEND,
+    DebugCandidate as DebugCandidate,
     ItemCandidate as ItemCandidate,
     ItemCategory as ItemCategory,
     ItemFaction as ItemFaction,
@@ -22,6 +23,7 @@ __version__: str
 __author__: str
 
 __all__ = [
+    "DebugCandidate",
     "ItemCandidate",
     "ItemCategory",
     "ItemFaction",

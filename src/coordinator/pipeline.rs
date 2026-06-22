@@ -31,7 +31,7 @@ use crate::enums::ItemFaction;
 use crate::enums::StockpileType;
 use crate::error::{FsOcrError, Result};
 use crate::image_utils;
-use crate::models::{ItemCandidate, Stockpile, StockpileItem, Timing};
+use crate::models::{DebugCandidate, ItemCandidate, Stockpile, StockpileItem, Timing};
 use crate::ocr::{digit_matcher, ChineseNameReader, TextExtractor};
 use crate::template::database::TemplateDatabase;
 use crate::template::matching::{MatchFilter, MatchResult, TemplateMatcher};
@@ -199,6 +199,36 @@ impl ScanPipeline {
         height: i32,
         faction: Option<ItemFaction>,
     ) -> Result<Stockpile> {
+        self.scan_with(image, width, height, faction, false)
+    }
+
+    /// Scan a stockpile screenshot, attaching broad diagnostic candidates.
+    ///
+    /// Identical to [`Self::scan`] for detection, OCR, and metadata, but the
+    /// matching step returns the full pHash-filtered, NCC-scored candidate set
+    /// per icon (any code/category/mod/faction, matching the icon's crated
+    /// state) on each item's `debug_candidates`. The `faction` argument is
+    /// accepted for signature parity but does not constrain matching here.
+    pub fn scan_debug(
+        &mut self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+        faction: Option<ItemFaction>,
+    ) -> Result<Stockpile> {
+        self.scan_with(image, width, height, faction, true)
+    }
+
+    /// Shared scan implementation. When `debug` is true the matching step uses
+    /// [`Self::match_icons_debug`]; otherwise the normal production matcher.
+    fn scan_with(
+        &mut self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+        faction: Option<ItemFaction>,
+        debug: bool,
+    ) -> Result<Stockpile> {
         // Validate dimensions (prevent overflow and unreasonable sizes)
         const MAX_DIMENSION: i32 = 10_000;
         if width <= 0 || height <= 0 {
@@ -266,9 +296,15 @@ impl ScanPipeline {
         let quantities = self.extract_quantities(image, width, height, &regions)?;
         timing.quantity_ms = Some(quantity_start.elapsed().as_secs_f64() * 1000.0);
 
-        // Step 3: Match icons to templates
+        // Step 3: Match icons to templates.
+        // The debug path intentionally ignores `faction`: it returns the broad,
+        // unfiltered candidate set (see `match_icons_debug`).
         let match_start = Instant::now();
-        let items = self.match_icons(image, width, height, &regions, &quantities, faction)?;
+        let items = if debug {
+            self.match_icons_debug(image, width, height, &regions, &quantities)?
+        } else {
+            self.match_icons(image, width, height, &regions, &quantities, faction)?
+        };
         timing.matching_ms = Some(match_start.elapsed().as_secs_f64() * 1000.0);
 
         // Step 4: Extract stockpile metadata (type, name, shard)
@@ -739,21 +775,9 @@ impl ScanPipeline {
         let icons_data: Vec<(Vec<u8>, u64, i32, i32)> = regions
             .icon_regions
             .par_iter()
-            .map(|&(ix, iy, iw, ih)| {
-                let icon_w = iw.max(1) as usize;
-                let icon_h = ih.max(1) as usize;
-
-                let icon_image = extract_region(
-                    image,
-                    width as usize,
-                    height as usize,
-                    ix.max(0) as usize,
-                    iy.max(0) as usize,
-                    icon_w,
-                    icon_h,
-                );
-
-                let phash = compute_phash(&icon_image, icon_w, icon_h);
+            .map(|&region| {
+                let (_, _, iw, ih) = region;
+                let (icon_image, phash) = extract_icon_phash(image, width, height, region);
                 (icon_image, phash, iw, ih)
             })
             .collect();
@@ -875,6 +899,97 @@ impl ScanPipeline {
         Ok(items)
     }
 
+    /// Match detected icons against the full template set for the debug viewer.
+    ///
+    /// Mirrors the icon extraction of [`Self::match_icons`] but, per icon,
+    /// returns the broad diagnostic candidate set (any code/category/mod/
+    /// faction, matching only the icon's crated state). Each item's
+    /// `code`/`confidence`/`crated` is taken from the top candidate; the full
+    /// ranked set is attached as `debug_candidates`. There is no faction or
+    /// category filtering and no group-based two-phase pass.
+    fn match_icons_debug(
+        &self,
+        image: &[u8],
+        width: i32,
+        height: i32,
+        regions: &crate::detector::DetectedRegions,
+        quantities: &[i32],
+    ) -> Result<Vec<StockpileItem>> {
+        // If no database loaded, return unknown items (mirrors match_icons).
+        let database = match &self.database {
+            Some(db) => db,
+            None => {
+                return Ok(quantities
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &qty)| {
+                        let crated = self.detect_crated_from_group(i, &regions.groups);
+                        let (x, y) = icon_position(regions, i);
+                        StockpileItem::unknown(qty, crated).with_position(x, y)
+                    })
+                    .collect());
+            }
+        };
+
+        let matcher = TemplateMatcher::new(
+            Arc::clone(database),
+            self.config.phash_threshold,
+            self.config.max_ncc_candidates,
+            self.config.confidence_gap,
+            self.config.ncc_tiebreaker_threshold,
+            self.config.ncc_initial_candidates,
+            self.config.ncc_escalation_threshold,
+        );
+
+        // Each icon is independent: extract, pHash, broad-match, all in parallel.
+        let items: Vec<StockpileItem> = regions
+            .icon_regions
+            .par_iter()
+            .enumerate()
+            .map(|(item_idx, &region)| {
+                let (ix, iy, _, _) = region;
+                let (icon_image, phash) = extract_icon_phash(image, width, height, region);
+                let quantity = quantities.get(item_idx).copied().unwrap_or(-1);
+                let crated = self.detect_crated_from_group(item_idx, &regions.groups);
+
+                let matches = matcher.match_icon_debug(&icon_image, phash, crated);
+
+                // The matched item adopts the top candidate's identity; if no
+                // candidate passed the pHash filter it falls back to unknown.
+                let item = match matches.first() {
+                    Some(best) => StockpileItem::new(
+                        best.code.clone(),
+                        quantity,
+                        best.crated,
+                        best.confidence,
+                        None,
+                    ),
+                    None => StockpileItem::unknown(quantity, crated),
+                };
+
+                let debug_candidates: Vec<DebugCandidate> = matches
+                    .into_iter()
+                    .map(|m| {
+                        DebugCandidate::new(
+                            m.code,
+                            m.confidence,
+                            m.mod_name,
+                            m.category.value().to_string(),
+                            m.crated,
+                            m.faction.value().to_string(),
+                            m.phash_distance,
+                        )
+                    })
+                    .collect();
+
+                item.with_debug_candidates(debug_candidates)
+                    .with_position(ix, iy)
+            })
+            .collect();
+
+        Ok(items)
+    }
+
     /// Detect if an item should be crated based on its group.
     fn detect_crated_from_group(
         &self,
@@ -984,6 +1099,36 @@ impl ScanPipeline {
 
         Ok((regions, blackbox_ms, greymask_ms))
     }
+}
+
+/// Extract one icon region's pixels and its perceptual hash.
+///
+/// Shared by the production ([`ScanPipeline::match_icons`]) and debug
+/// ([`ScanPipeline::match_icons_debug`]) matching paths so the clamp +
+/// `extract_region` + `compute_phash` sequence stays identical between them.
+/// `region` is `(x, y, w, h)` in source-image pixels.
+fn extract_icon_phash(
+    image: &[u8],
+    width: i32,
+    height: i32,
+    region: (i32, i32, i32, i32),
+) -> (Vec<u8>, u64) {
+    let (ix, iy, iw, ih) = region;
+    let icon_w = iw.max(1) as usize;
+    let icon_h = ih.max(1) as usize;
+
+    let icon_image = extract_region(
+        image,
+        width as usize,
+        height as usize,
+        ix.max(0) as usize,
+        iy.max(0) as usize,
+        icon_w,
+        icon_h,
+    );
+
+    let phash = compute_phash(&icon_image, icon_w, icon_h);
+    (icon_image, phash)
 }
 
 /// Top-left `(x, y)` of the icon region at `index`, or `(0, 0)` if absent.

@@ -50,7 +50,7 @@ use coordinator::ScanPipeline;
 #[cfg(feature = "python")]
 use enums::{ItemCategory, ItemFaction, StockpileType};
 #[cfg(feature = "python")]
-use models::{ItemCandidate, Stockpile, StockpileItem, Timing};
+use models::{DebugCandidate, ItemCandidate, Stockpile, StockpileItem, Timing};
 
 /// Allowed extensions for database files.
 #[cfg(feature = "python")]
@@ -224,6 +224,89 @@ impl StockpileScanner {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Scan a screenshot and attach broad diagnostic candidates per item.
+    ///
+    /// Like [`scan`](Self::scan), but each returned `StockpileItem` carries a
+    /// `debug_candidates` list: every template that passed the pHash threshold
+    /// for that icon's crated state (any code/category/mod/faction), NCC-scored
+    /// and ranked. Each `DebugCandidate` exposes `code`, `confidence`, `mod`,
+    /// `category`, `crated`, `faction`, and `phash_distance`. The item's own
+    /// `code`/`confidence` are taken from the top candidate.
+    ///
+    /// Intended for the debug image viewer. The `faction` argument is accepted
+    /// for parity with `scan` but does not constrain the candidate set.
+    ///
+    /// Args:
+    ///     image: NumPy array (H x W x 3, uint8, BGR format).
+    ///     faction: Accepted for parity; does not filter candidates.
+    ///     config: Optional scan configuration (e.g. phash_threshold,
+    ///         max_ncc_candidates from the viewer's spinboxes).
+    ///
+    /// Returns:
+    ///     Stockpile result whose items carry `debug_candidates`.
+    #[pyo3(signature = (image, faction=None, config=None))]
+    pub fn scan_debug(
+        &mut self,
+        image: PyReadonlyArray3<u8>,
+        faction: Option<&str>,
+        config: Option<ScanConfig>,
+    ) -> PyResult<Stockpile> {
+        if let Some(cfg) = config {
+            self.pipeline.set_config(cfg);
+        }
+
+        let faction_enum = faction.map(|f| ItemFaction::from_string(Some(f)));
+
+        let shape = image.shape();
+        let height = shape[0] as i32;
+        let width = shape[1] as i32;
+
+        let image_data = image.as_slice()?;
+
+        self.pipeline
+            .scan_debug(image_data, width, height, faction_enum)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Scan a screenshot from a file path with broad diagnostic candidates.
+    ///
+    /// File-path counterpart of [`scan_debug`](Self::scan_debug); see it for
+    /// the candidate semantics.
+    ///
+    /// Args:
+    ///     image_path: Path to the image file.
+    ///     faction: Accepted for parity; does not filter candidates.
+    ///     config: Optional scan configuration.
+    ///
+    /// Returns:
+    ///     Stockpile result whose items carry `debug_candidates`.
+    #[pyo3(signature = (image_path, faction=None, config=None))]
+    pub fn scan_debug_file(
+        &mut self,
+        image_path: &str,
+        faction: Option<&str>,
+        config: Option<ScanConfig>,
+    ) -> PyResult<Stockpile> {
+        validate_image_path(image_path).map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+        if let Some(cfg) = config {
+            self.pipeline.set_config(cfg);
+        }
+
+        let img = image::open(image_path)
+            .map_err(|_| pyo3::exceptions::PyIOError::new_err("Failed to load image file"))?;
+
+        let rgb = img.to_rgb8();
+        let (width, height) = rgb.dimensions();
+        let image_data = rgb.into_raw();
+
+        let faction_enum = faction.map(|f| ItemFaction::from_string(Some(f)));
+
+        self.pipeline
+            .scan_debug(&image_data, width as i32, height as i32, faction_enum)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Get the current configuration.
     pub fn get_config(&self) -> ScanConfig {
         self.pipeline.config().clone()
@@ -331,6 +414,7 @@ fn _fs_ocr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stockpile>()?;
     m.add_class::<StockpileItem>()?;
     m.add_class::<ItemCandidate>()?;
+    m.add_class::<DebugCandidate>()?;
     m.add_class::<Timing>()?;
 
     // Debug/verification functions

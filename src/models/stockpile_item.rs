@@ -29,6 +29,117 @@ impl ItemCandidate {
     }
 }
 
+/// A diagnostic candidate produced by `scan_debug`.
+///
+/// Unlike [`ItemCandidate`] (the narrow, gap-restricted production
+/// alternatives), this carries the full metadata the debug image viewer needs.
+/// It represents one template that passed the icon's pHash threshold — any
+/// code/category/mod/faction, matching the icon's crated state — NCC-scored.
+#[cfg_attr(feature = "python", pyclass)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugCandidate {
+    /// Item code identifier.
+    pub code: String,
+
+    /// NCC match confidence (TM_CCOEFF_NORMED), 0.0 - 1.0.
+    #[serde(serialize_with = "serialize_confidence")]
+    pub confidence: f64,
+
+    /// Mod name (e.g. "vanilla", "airborne").
+    #[serde(rename = "mod")]
+    pub mod_name: String,
+
+    /// Item category ("item", "vehicle", "shippable", "invalid").
+    pub category: String,
+
+    /// Whether the template is a crated item.
+    pub crated: bool,
+
+    /// Item faction ("neutral", "Colonials", "Wardens").
+    pub faction: String,
+
+    /// Hamming distance between the icon and template pHash (lower = closer).
+    pub phash_distance: u32,
+}
+
+impl DebugCandidate {
+    /// Create a new debug candidate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        code: String,
+        confidence: f64,
+        mod_name: String,
+        category: String,
+        crated: bool,
+        faction: String,
+        phash_distance: u32,
+    ) -> Self {
+        Self {
+            code,
+            confidence,
+            mod_name,
+            category,
+            crated,
+            faction,
+            phash_distance,
+        }
+    }
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl DebugCandidate {
+    #[getter]
+    fn code(&self) -> String {
+        self.code.clone()
+    }
+
+    #[getter]
+    fn confidence(&self) -> f64 {
+        self.confidence
+    }
+
+    #[getter]
+    #[pyo3(name = "mod")]
+    fn mod_name(&self) -> String {
+        self.mod_name.clone()
+    }
+
+    #[getter]
+    fn category(&self) -> String {
+        self.category.clone()
+    }
+
+    #[getter]
+    fn crated(&self) -> bool {
+        self.crated
+    }
+
+    #[getter]
+    fn faction(&self) -> String {
+        self.faction.clone()
+    }
+
+    #[getter]
+    fn phash_distance(&self) -> u32 {
+        self.phash_distance
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DebugCandidate(code='{}', confidence={:.4}, mod='{}', category='{}', \
+             crated={}, faction='{}', phash_distance={})",
+            self.code,
+            self.confidence,
+            self.mod_name,
+            self.category,
+            self.crated,
+            self.faction,
+            self.phash_distance
+        )
+    }
+}
+
 #[cfg(feature = "python")]
 #[pymethods]
 impl ItemCandidate {
@@ -86,6 +197,11 @@ pub struct StockpileItem {
     /// Alternative candidates within the confidence gap (if configured).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidates: Option<Vec<ItemCandidate>>,
+
+    /// Broad diagnostic candidate set, populated only by `scan_debug`.
+    /// `None` (and omitted from JSON) for the normal `scan` path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_candidates: Option<Vec<DebugCandidate>>,
 }
 
 impl StockpileItem {
@@ -105,6 +221,7 @@ impl StockpileItem {
             x: 0,
             y: 0,
             candidates,
+            debug_candidates: None,
         }
     }
 
@@ -118,6 +235,15 @@ impl StockpileItem {
             x: 0,
             y: 0,
             candidates: None,
+            debug_candidates: None,
+        }
+    }
+
+    /// Return a copy of this item carrying the given debug candidate set.
+    pub fn with_debug_candidates(self, debug_candidates: Vec<DebugCandidate>) -> Self {
+        Self {
+            debug_candidates: Some(debug_candidates),
+            ..self
         }
     }
 
@@ -189,6 +315,11 @@ impl StockpileItem {
         self.candidates.clone()
     }
 
+    #[getter]
+    fn debug_candidates(&self) -> Option<Vec<DebugCandidate>> {
+        self.debug_candidates.clone()
+    }
+
     #[pyo3(name = "is_matched")]
     fn py_is_matched(&self) -> bool {
         self.is_matched()
@@ -211,5 +342,74 @@ impl StockpileItem {
 impl Default for StockpileItem {
     fn default() -> Self {
         Self::unknown(-1, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_candidate_json_unchanged_by_debug_fields() {
+        // Production ItemCandidate must serialize to exactly code + confidence.
+        let c = ItemCandidate::new("RifleC".to_string(), 0.987654);
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, r#"{"code":"RifleC","confidence":0.988}"#);
+    }
+
+    #[test]
+    fn production_item_omits_debug_candidates() {
+        // A normal (scan-path) item leaves debug_candidates None and must not
+        // emit the key — keeps production output byte-for-byte unchanged.
+        let item = StockpileItem::new("RifleC".to_string(), 5, false, 0.95, None);
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("debug_candidates"));
+    }
+
+    #[test]
+    fn debug_candidate_serializes_mod_key_and_metadata() {
+        let dc = DebugCandidate::new(
+            "RifleC".to_string(),
+            0.912345,
+            "vanilla".to_string(),
+            "item".to_string(),
+            false,
+            "Colonials".to_string(),
+            7,
+        );
+        let json = serde_json::to_string(&dc).unwrap();
+        assert!(json.contains(r#""mod":"vanilla""#));
+        assert!(json.contains(r#""category":"item""#));
+        assert!(json.contains(r#""faction":"Colonials""#));
+        assert!(json.contains(r#""phash_distance":7"#));
+        assert!(json.contains(r#""confidence":0.912"#));
+    }
+
+    #[test]
+    fn debug_item_round_trips_and_carries_candidates() {
+        let dc = DebugCandidate::new(
+            "RifleC".to_string(),
+            1.0,
+            "vanilla".to_string(),
+            "item".to_string(),
+            false,
+            "neutral".to_string(),
+            0,
+        );
+        let item = StockpileItem::new("RifleC".to_string(), 5, false, 1.0, None)
+            .with_debug_candidates(vec![dc]);
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("debug_candidates"));
+
+        let parsed: StockpileItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.debug_candidates.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn item_json_without_debug_field_deserializes() {
+        // Back-compat: older JSON without the key parses to None.
+        let json = r#"{"code":"RifleC","quantity":5,"crated":false,"confidence":0.95,"x":0,"y":0}"#;
+        let parsed: StockpileItem = serde_json::from_str(json).unwrap();
+        assert!(parsed.debug_candidates.is_none());
     }
 }

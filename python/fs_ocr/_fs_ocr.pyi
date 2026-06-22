@@ -19,6 +19,7 @@ __all__ = [
     "Stockpile",
     "StockpileItem",
     "ItemCandidate",
+    "DebugCandidate",
     "Timing",
     "compute_phash",
     "__version__",
@@ -121,6 +122,31 @@ class ItemCandidate:
     def __new__(cls, code: str, confidence: float) -> ItemCandidate: ...
 
 @final
+class DebugCandidate:
+    """A diagnostic candidate produced by ``scan_debug``.
+
+    Unlike :class:`ItemCandidate`, this carries the full metadata the debug
+    image viewer needs: one template that passed the icon's pHash threshold
+    (any code/category/mod/faction, matching the icon's crated state),
+    NCC-scored. ``mod`` is exposed as an attribute (it is not a Python keyword).
+    """
+
+    @property
+    def code(self) -> str: ...
+    @property
+    def confidence(self) -> float: ...
+    @property
+    def mod(self) -> str: ...
+    @property
+    def category(self) -> str: ...
+    @property
+    def crated(self) -> bool: ...
+    @property
+    def faction(self) -> str: ...
+    @property
+    def phash_distance(self) -> int: ...
+
+@final
 class StockpileItem:
     """A single item detected in a stockpile."""
 
@@ -138,6 +164,8 @@ class StockpileItem:
     def y(self) -> int: ...
     @property
     def candidates(self) -> list[ItemCandidate] | None: ...
+    @property
+    def debug_candidates(self) -> list[DebugCandidate] | None: ...
     def __new__(
         cls,
         code: str,
@@ -210,6 +238,18 @@ class StockpileScanner:
         config: ScanConfig | None = ...,
     ) -> Stockpile: ...
     def scan_file(
+        self,
+        image_path: str,
+        faction: str | None = ...,
+        config: ScanConfig | None = ...,
+    ) -> Stockpile: ...
+    def scan_debug(
+        self,
+        image: _ImageArray,
+        faction: str | None = ...,
+        config: ScanConfig | None = ...,
+    ) -> Stockpile: ...
+    def scan_debug_file(
         self,
         image_path: str,
         faction: str | None = ...,

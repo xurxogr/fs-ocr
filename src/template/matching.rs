@@ -274,6 +274,102 @@ impl TemplateMatcher {
     }
 }
 
+/// A single diagnostic match from [`TemplateMatcher::match_icon_debug`].
+#[derive(Debug, Clone)]
+pub struct DebugMatch {
+    /// Item code identifier.
+    pub code: String,
+    /// Mod name.
+    pub mod_name: String,
+    /// Item category.
+    pub category: ItemCategory,
+    /// Whether the template is crated.
+    pub crated: bool,
+    /// Item faction.
+    pub faction: ItemFaction,
+    /// NCC confidence (0.0 - 1.0).
+    pub confidence: f64,
+    /// Hamming distance between icon and template pHash.
+    pub phash_distance: u32,
+}
+
+impl TemplateMatcher {
+    /// Match an icon against the full template set, for diagnostics.
+    ///
+    /// Unlike [`Self::match_icon_with_phash`], this applies no
+    /// faction/category/mod filter and no adaptive escalation or tiebreaker:
+    /// it NCC-scores every template matching `crated` whose pHash is within the
+    /// threshold (capped by `max_ncc_candidates`) and reports per-candidate
+    /// metadata plus pHash distance. Results are sorted by NCC confidence desc.
+    pub fn match_icon_debug(
+        &self,
+        icon_image: &[u8],
+        icon_phash: u64,
+        crated: bool,
+    ) -> Vec<DebugMatch> {
+        // Broad candidate set: only the icon's crated state constrains it.
+        let candidate_indices = self
+            .database
+            .get_candidates(None, None, None, Some(crated), None);
+
+        if candidate_indices.is_empty() {
+            return Vec::new();
+        }
+
+        // Phase 1: pHash filtering (keeps the per-candidate Hamming distance).
+        let candidate_phashes: Vec<u64> = candidate_indices
+            .iter()
+            .map(|&i| self.database.phash_array[i])
+            .collect();
+
+        let phash_matches = filter_by_phash(
+            icon_phash,
+            &candidate_phashes,
+            self.phash_threshold,
+            self.max_ncc_candidates,
+        );
+
+        // Phase 2: NCC-score every surviving candidate.
+        let mut matches: Vec<DebugMatch> = phash_matches
+            .par_iter()
+            .map(|&(local_idx, dist)| {
+                let idx = candidate_indices[local_idx];
+                let template = &self.database.templates[idx];
+
+                let confidence = if icon_image.len() == template.image_data.len() {
+                    ncc_with_precomputed(
+                        icon_image,
+                        &template.image_data,
+                        self.database.ncc_means[idx],
+                        self.database.ncc_inv_stds[idx],
+                    ) as f64
+                } else {
+                    compute_ncc(icon_image, &template.image_data)
+                };
+
+                DebugMatch {
+                    code: template.code.clone(),
+                    mod_name: template.mod_name.clone(),
+                    category: template.category,
+                    crated: template.crated,
+                    faction: template.faction,
+                    confidence,
+                    phash_distance: dist,
+                }
+            })
+            .collect();
+
+        // Rank by NCC confidence (descending).
+        matches.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        matches
+    }
+}
+
 /// Compute Normalized Cross-Correlation (NCC) between two images.
 ///
 /// Pure Rust implementation for maximum performance.
@@ -474,6 +570,103 @@ mod tests {
 
         let ncc = compute_ncc(&image1, &image2);
         assert!(ncc > 0.9, "NCC should be high for similar images: {}", ncc);
+    }
+
+    fn debug_db() -> Arc<TemplateDatabase> {
+        use super::super::database::{IconTemplate, TemplateDatabase};
+
+        let mut db = TemplateDatabase::new(2160);
+        let icon: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 256) as u8).collect();
+        let other: Vec<u8> = (0..64 * 64 * 3).map(|i| ((i * 3) % 256) as u8).collect();
+
+        // Exact match: Item / Neutral / base form.
+        db.add_template(
+            IconTemplate::builder()
+                .image(icon.clone())
+                .code("exact")
+                .mod_name("vanilla")
+                .faction(ItemFaction::Neutral)
+                .category(ItemCategory::Item)
+                .crated(false)
+                .phash(0)
+                .build(),
+        );
+        // Cross-category / cross-faction near-miss, still base form.
+        db.add_template(
+            IconTemplate::builder()
+                .image(other)
+                .code("other")
+                .mod_name("airborne")
+                .faction(ItemFaction::Wardens)
+                .category(ItemCategory::Vehicle)
+                .crated(false)
+                .phash(0)
+                .build(),
+        );
+        // Crated template: must be excluded when the icon is base form.
+        db.add_template(
+            IconTemplate::builder()
+                .image(icon)
+                .code("crated_one")
+                .mod_name("vanilla")
+                .faction(ItemFaction::Neutral)
+                .category(ItemCategory::Item)
+                .crated(true)
+                .phash(0)
+                .build(),
+        );
+
+        Arc::new(db)
+    }
+
+    #[test]
+    fn test_match_icon_debug_broad_cross_category() {
+        let icon: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 256) as u8).collect();
+        let matcher = TemplateMatcher::new(debug_db(), 64, 100, 0.0, 0.0, 25, 0.85);
+
+        let results = matcher.match_icon_debug(&icon, 0, false);
+
+        // Crated-only filter: the crated template is gone, the two base ones stay.
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|m| !m.crated));
+
+        // Top candidate is the exact match with confidence ~1.0.
+        assert_eq!(results[0].code, "exact");
+        assert!((results[0].confidence - 1.0).abs() < 1e-6);
+        assert_eq!(results[0].phash_distance, 0);
+
+        // The cross-category / cross-faction near-miss is included (the whole point).
+        assert!(results
+            .iter()
+            .any(|m| m.category == ItemCategory::Vehicle && m.faction == ItemFaction::Wardens));
+
+        // Ranked by NCC descending.
+        assert!(results[0].confidence >= results[1].confidence);
+    }
+
+    #[test]
+    fn test_match_icon_debug_caps_at_max_candidates() {
+        let icon: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 256) as u8).collect();
+        // max_ncc_candidates = 1 must cap the returned set even though 2 pass pHash.
+        let matcher = TemplateMatcher::new(debug_db(), 64, 1, 0.0, 0.0, 25, 0.85);
+
+        let results = matcher.match_icon_debug(&icon, 0, false);
+        assert_eq!(results.len(), 1);
+        // The single kept candidate must be the highest-NCC one, not an
+        // arbitrary survivor of the cap.
+        assert_eq!(results[0].code, "exact");
+    }
+
+    #[test]
+    fn test_match_icon_debug_crated_filter() {
+        let icon: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 256) as u8).collect();
+        let matcher = TemplateMatcher::new(debug_db(), 64, 100, 0.0, 0.0, 25, 0.85);
+
+        // Asking for crated icons returns only the single crated template.
+        let results = matcher.match_icon_debug(&icon, 0, true);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].code, "crated_one");
+        assert!(results[0].crated);
     }
 
     #[test]
