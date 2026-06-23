@@ -1,4 +1,4 @@
-<!-- Generated: 2026-06-15 | Files scanned: 41 | Token estimate: ~650 -->
+<!-- Generated: 2026-06-23 | Files scanned: 42 | Token estimate: ~700 -->
 
 # fs-ocr API
 
@@ -12,6 +12,11 @@ scanner = StockpileScanner(database_path: str, data_path: str = "data")
 # Core methods
 scanner.scan(image: np.ndarray, faction: str = None, config: ScanConfig = None) -> Stockpile
 scanner.scan_file(path: str, faction: str = None, config: ScanConfig = None) -> Stockpile
+
+# Debug methods (broad per-icon candidate diagnostics; production output unchanged)
+scanner.scan_debug(image: np.ndarray, faction: str = None, config: ScanConfig = None) -> Stockpile
+scanner.scan_debug_file(path: str, faction: str = None, config: ScanConfig = None) -> Stockpile
+
 scanner.preload(resolution: int = 2160) -> None   # Warm DB + OCR caches
 scanner.is_preloaded() -> bool
 scanner.get_config() / scanner.set_config(config)
@@ -53,18 +58,37 @@ stockpile.item_count() / matched_count() / crated_count() / is_successful()
 stockpile.to_json() / to_json_compact()
 ```
 
-### StockpileItem / ItemCandidate
+### StockpileItem / ItemCandidate / DebugCandidate
 
 ```python
 item.code: str          # "Unknown" if no match
 item.quantity: int      # -1 if recognition failed
 item.crated: bool
 item.confidence: float  # 0.0-1.0 (serialized rounded to 3 decimals)
-item.candidates: Optional[List[ItemCandidate]]  # alternatives within gap
+item.x: int / item.y: int                       # icon top-left in source image
+item.candidates: Optional[List[ItemCandidate]]  # alternatives within gap (scan)
+item.debug_candidates: Optional[List[DebugCandidate]]  # broad set (scan_debug only)
 item.is_matched() / item.to_json()
 
 candidate.code: str
 candidate.confidence: float
+```
+
+`debug_candidates` is populated only by `scan_debug`/`scan_debug_file`. It holds
+every template that passed the icon's pHash threshold for its crated state —
+any code/category/mod/faction — NCC-scored and ranked desc, capped by
+`max_ncc_candidates`. The item's `code`/`confidence` is the top candidate. On
+the normal `scan` path the field is `None` and omitted from JSON (output
+unchanged). `mod` is exposed as an attribute (not a Python keyword).
+
+```python
+debug_candidate.code: str
+debug_candidate.confidence: float    # NCC (TM_CCOEFF_NORMED)
+debug_candidate.mod: str
+debug_candidate.category: str        # "item" / "vehicle" / "shippable" / "invalid"
+debug_candidate.crated: bool
+debug_candidate.faction: str         # "neutral" / "Colonials" / "Wardens"
+debug_candidate.phash_distance: int  # Hamming distance icon↔template
 ```
 
 ### Timing
@@ -78,7 +102,7 @@ timing.detection_ms / blackbox_ms / greymask_ms
 
 ```python
 ItemFaction:   Neutral=0, Colonials=1, Wardens=2
-ItemCategory:  Invalid=0, Item=1, Vehicle=2, Structure=3, Shippable=4, Liquid=5
+ItemCategory:  Item=0, Vehicle=1, Shippable=2, Invalid=3
 StockpileType: Seaport=0, StorageDepot=1, ... Undefined
 ```
 

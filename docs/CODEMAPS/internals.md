@@ -1,4 +1,4 @@
-<!-- Generated: 2026-06-15 | Files scanned: 41 | Token estimate: ~800 -->
+<!-- Generated: 2026-06-23 | Files scanned: 42 | Token estimate: ~840 -->
 
 # fs-ocr Internals
 
@@ -61,6 +61,21 @@ Process:
      pick winner by edge(Sobel)-diff
   5. Group-based category detection (first group may skip filter)
 Output: MatchResult { best_match, confidence, gap_candidates }
+```
+
+### 3b. Debug Matching (TemplateMatcher::match_icon_debug — scan_debug only)
+
+```
+Input: icon images, template database, icon crated state
+Process (match_icons_debug, parallel per icon):
+  1. Candidate filter: crated state ONLY (no faction/category/mod)
+  2. pHash filter (Hamming ≤ phash_threshold), capped at max_ncc_candidates
+  3. NCC-score every survivor (no adaptive escalation, no tiebreaker)
+  4. Sort by NCC desc; record phash_distance per candidate
+Output: Vec<DebugMatch>{code,mod,category,crated,faction,confidence,phash_distance}
+        → item.code/confidence = top candidate; full set on debug_candidates
+Note: shares extract_icon_phash with the production path; production scan
+      output is unchanged (debug_candidates serde-skipped when None).
 ```
 
 ### 4. Metadata Extraction

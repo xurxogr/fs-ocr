@@ -127,6 +127,12 @@ result = scanner.scan_file(
 )
 ```
 
+`scan_debug(image, ...)` and `scan_debug_file(path, ...)` take the same
+arguments and return the same `Stockpile`, but additionally populate each
+item's `debug_candidates` with the broad diagnostic candidate set (see
+[StockpileItem](#stockpileitem)). The normal `scan`/`scan_file` output is
+unchanged. Intended for tooling that needs to inspect *why* an icon matched.
+
 ### ScanConfig
 
 <!-- AUTO-GENERATED from src/config.rs -->
@@ -171,11 +177,30 @@ stockpile.to_json()        # Serialize to JSON (to_json_compact() for one line)
 Individual detected item.
 
 ```python
-item.code        # Item code or "Unknown"
-item.quantity    # Detected quantity (-1 if failed)
-item.crated      # Whether item is crated
-item.confidence  # Match confidence (0.0 - 1.0)
-item.candidates  # Alternative matches (if confidence_gap > 0)
+item.code             # Item code or "Unknown"
+item.quantity         # Detected quantity (-1 if failed)
+item.crated           # Whether item is crated
+item.confidence       # Match confidence (0.0 - 1.0)
+item.x, item.y        # Icon top-left (px) in the source screenshot
+item.candidates       # Alternative matches (if confidence_gap > 0)
+item.debug_candidates # Broad diagnostic set; None unless scanned via scan_debug
+```
+
+### DebugCandidate
+
+Populated only by `scan_debug` / `scan_debug_file`. One entry per template that
+passed the icon's pHash threshold for its crated state — any
+code/category/mod/faction — NCC-scored and ranked descending, capped by
+`max_ncc_candidates`. The item's `code`/`confidence` equals the top candidate.
+
+```python
+candidate.code           # Item code
+candidate.confidence     # NCC score (0.0 - 1.0)
+candidate.mod            # Mod name (e.g. "vanilla", "airborne")
+candidate.category       # "item" / "vehicle" / "shippable" / "invalid"
+candidate.crated         # Whether the template is crated
+candidate.faction        # "neutral" / "Colonials" / "Wardens"
+candidate.phash_distance # Hamming distance icon-to-template (lower = closer)
 ```
 
 ## CLI Usage

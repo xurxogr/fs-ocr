@@ -1,4 +1,4 @@
-<!-- Generated: 2026-06-15 | Files scanned: 41 | Token estimate: ~750 -->
+<!-- Generated: 2026-06-23 | Files scanned: 42 | Token estimate: ~770 -->
 
 # fs-ocr Architecture
 
@@ -52,7 +52,7 @@ Only 5 modules are `pub` (the intentional API); everything else is `mod`
 
 ```
 src/
-├── lib.rs              # PyO3 module + StockpileScanner class (349)
+├── lib.rs              # PyO3 module + StockpileScanner class; scan/scan_debug (433)
 ├── bin/fs-ocr.rs       # CLI binary (clap; scan/version subcommands)
 ├── config.rs           # ScanConfig (thresholds, adaptive NCC tuning)
 ├── constants.rs        # Resolution scaling, supported resolutions
@@ -60,7 +60,7 @@ src/
 ├── image_utils.rs      # RGB→grayscale, crop helpers
 ├── text_utils.rs       # Levenshtein / fuzzy string helpers
 ├── coordinator/
-│   ├── pipeline.rs         # ScanPipeline orchestration (1024)
+│   ├── pipeline.rs         # ScanPipeline orchestration; scan_with/match_icons[_debug] (1190)
 │   ├── region_preprocess.rs# OCR image prep: luma, autocontrast, framing,
 │   │                       #   upscale, name-row split/join (857)
 │   ├── metadata_parse.rs   # client-lang routing, public-default name,
@@ -76,12 +76,12 @@ src/
 │       └── grouping.rs     #   box→grid grouping geometry (200)
 ├── enums/
 │   ├── item_faction.rs     # Neutral/Colonials/Wardens
-│   ├── item_category.rs    # Item/Vehicle/Structure/Shippable/Liquid
+│   ├── item_category.rs    # Item/Vehicle/Shippable/Invalid
 │   ├── game_language.rs    # English/German/French/Portuguese/Russian/Chinese
 │   └── stockpile_type.rs   # Base types (Seaport, Depot, …)
 ├── models/
 │   ├── stockpile.rs        # Top-level scan result
-│   ├── stockpile_item.rs   # Item match + ItemCandidate
+│   ├── stockpile_item.rs   # Item match + ItemCandidate + DebugCandidate
 │   └── timing.rs           # Per-stage Timing metrics
 ├── ocr/
 │   ├── engine.rs           # OcrEngine trait + OcrConfig
@@ -93,12 +93,22 @@ src/
 │   └── tesseract.rs        # ChineseNameReader (system `tesseract` CLI)
 └── template/
     ├── database.rs         # HDF5 template loading (546)
-    ├── matching.rs         # NCC + adaptive escalation + tiebreaker (488)
+    ├── matching.rs         # NCC + adaptive escalation + tiebreaker; match_icon_debug (681)
     ├── phash.rs            # Perceptual hash (aHash, 64-bit)
     ├── label_match.rs      # generic template label matcher
     ├── public_match.rs     # "Public" default-name template (embedded asset)
     └── type_match.rs       # stockpile-type template (embedded asset)
 ```
+
+## Debug candidate path
+
+`scan_debug`/`scan_debug_file` reuse the full pipeline (detection, quantity,
+metadata) and swap only the matching step: `scan_with(debug=true)` calls
+`match_icons_debug`, which per icon returns the broad pHash-filtered,
+NCC-scored candidate set (crated-only filter — no faction/category/mod), each
+with `phash_distance`, attached as `StockpileItem.debug_candidates`. The
+production `scan` path and its JSON are unchanged (field serde-skipped when
+`None`). Intended for fs-tools' debug image viewer.
 
 ## OCR Backends
 
