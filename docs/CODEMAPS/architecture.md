@@ -123,7 +123,7 @@ production `scan` path and its JSON are unchanged (field serde-skipped when
 | Crate | Purpose |
 |-------|---------|
 | pyo3/numpy 0.24 | Python bindings (abi3-py310) |
-| hdf5 / hdf5-sys 0.8 | Template database I/O |
+| hdf5-metno 0.15 / hdf5-metno-sys 0.12 (as `hdf5` / `hdf5-sys`) | Template database I/O |
 | ocrs 0.11 / rten 0.22 | Pure-Rust OCR |
 | rayon 1.10 | Parallel NCC matching |
 | clap 4 | CLI parsing |

@@ -15,7 +15,7 @@
 | chrono | 0.4 | Timestamps (serde feature) |
 | image | 0.25 | Image decoding (png/jpeg/bmp/gif/webp/tiff; defaults off) |
 | clap | 4 | CLI argument parsing (derive) |
-| hdf5 / hdf5-sys | 0.8 | HDF5 template database |
+| hdf5-metno / hdf5-metno-sys (as `hdf5` / `hdf5-sys`) | 0.15 / 0.12 | HDF5 template database |
 | ocrs | 0.11 | Pure-Rust OCR engine |
 | rten / rten-imageproc | 0.22 | ML runtime + image ops for ocrs |
 
